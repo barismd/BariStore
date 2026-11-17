@@ -9,6 +9,8 @@ import struct
 import sys
 import tempfile
 import zipfile
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -102,6 +104,57 @@ def test_mdns_announcement_and_parser():
     txts = [r for r in records if r["type"] == 16]
     assert any(r["txt"].get("identifier") == identity.identifier for r in txts)
     assert any(r["txt"].get("name") == "BariStore" for r in txts)
+
+
+def test_mdns_advertiser_sends_on_a_fixed_schedule():
+    async def main():
+        fake_socket = Mock()
+        fake_socket.recvfrom.side_effect = AssertionError("advertiser should only send")
+        socket_api = SimpleNamespace(**vars(mdns.socket))
+        socket_api.socket = Mock(return_value=fake_socket)
+        waits = asyncio.Queue()
+
+        async def pause(seconds):
+            resume = asyncio.Event()
+            await waits.put((seconds, resume))
+            await resume.wait()
+
+        advertiser_asyncio = SimpleNamespace(create_task=asyncio.create_task, sleep=pause)
+        with (
+            patch.object(mdns, "asyncio", advertiser_asyncio),
+            patch.object(mdns, "interface_ips", return_value={"en0": "192.168.1.50", "en1": "192.168.2.50"}),
+            patch.object(mdns, "socket", socket_api),
+        ):
+            advertiser = mdns.Advertiser(pairing.HostIdentity.generate(), 54321).start()
+            task = advertiser._task
+            destinations = {
+                (mdns.MCAST, 5353), (mdns.BCAST_ALL, 5353), ("192.168.1.255", 5353),
+                ("192.168.1.50", 5353), ("192.168.2.50", 5353),
+                (mdns.LOOPBACK_VPN, 5353), (mdns.LOOPBACK_LOCAL, 5353),
+            }
+
+            def check_burst():
+                assert {call.args[1] for call in fake_socket.sendto.call_args_list} == destinations
+                assert fake_socket.sendto.call_count == len(destinations)
+                fake_socket.sendto.reset_mock()
+
+            try:
+                check_burst()
+                for _ in range(2):
+                    seconds, resume = await asyncio.wait_for(waits.get(), timeout=1)
+                    assert seconds == 1.0
+                    resume.set()
+                    await asyncio.sleep(0)
+                    check_burst()
+                fake_socket.recvfrom.assert_not_called()
+            finally:
+                advertiser.stop()
+                await asyncio.gather(task, return_exceptions=True)
+            assert task.cancelled()
+            fake_socket.close.assert_called_once()
+            fake_socket.sendto.assert_not_called()
+
+    asyncio.run(main())
 
 
 class DirectConnection:

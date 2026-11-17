@@ -12,7 +12,7 @@
 #
 #  Both `<identifier>._remotepairing-pairable-host._tcp.local` (as required by
 #  Apple's RPPairing responder specification) and `BariStore._remotepairing-...`
-#  are advertised every 250ms and in response to any incoming mDNS query.
+#  are announced at startup and once per second while pairing.
 # =============================================================================
 
 import asyncio
@@ -176,7 +176,7 @@ def subnet_broadcast(ipv4):
 
 
 class Advertiser:
-    """Fast 250ms raw mDNS advertiser and query responder for on-device pairing."""
+    """Send rate-limited mDNS announcements for on-device pairing."""
 
     def __init__(self, identity, port, name="BariStore"):
         self.identity = identity
@@ -185,7 +185,6 @@ class Advertiser:
         self.ipv4 = lan_ipv4()
         self.extra_ips = [ip for ip in interface_ips().values() if ip != self.ipv4]
         self.sock = None
-        self.bound = False
         self.packets = []
         self.destinations = []
         self._task = None
@@ -207,9 +206,8 @@ class Advertiser:
                 pass
         try:
             sock.bind(("", 5353))
-            self.bound = True
         except OSError:
-            self.bound = False
+            pass
         try:
             sock.setsockopt(
                 socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(primary_ip)
@@ -218,16 +216,6 @@ class Advertiser:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         except OSError:
             pass
-        if self.bound:
-            try:
-                sock.setsockopt(
-                    socket.IPPROTO_IP,
-                    socket.IP_ADD_MEMBERSHIP,
-                    socket.inet_aton(MCAST) + socket.inet_aton(primary_ip),
-                )
-            except OSError:
-                pass
-
         candidates = [
             ((MCAST, 5353), "multicast"),
             ((BCAST_ALL, 5353), "broadcast"),
@@ -267,32 +255,11 @@ class Advertiser:
                 pass
 
     async def _loop(self):
-        # Initial fast burst so Settings > Developer > Paired Macs sees us immediately
-        for _ in range(4):
-            self._burst_once()
-            await asyncio.sleep(0.1)
-
+        # start() already announces immediately. Reading the same mDNS socket
+        # can feed our own announcements back into the send loop.
         while True:
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(1.0)
             self._burst_once()
-            if not self.bound or not self.sock:
-                continue
-            while True:
-                try:
-                    data, address = self.sock.recvfrom(9000)
-                except (BlockingIOError, InterruptedError, OSError):
-                    break
-                if (
-                    b"_remotepairing" not in data
-                    and b"BariStore" not in data
-                    and self.identity.identifier.encode() not in data
-                ):
-                    continue
-                self._burst_once()
-                try:
-                    self.sock.sendto(self.packets[0], (address[0], 5353))
-                except OSError:
-                    pass
 
     def stop(self):
         if self._task is not None:
