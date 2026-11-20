@@ -32,7 +32,7 @@ import threading
 import time
 import uuid
 
-PROBE_VERSION = "1"
+PROBE_VERSION = "2"
 DIR = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.join(DIR, "report.txt")
 PARTS = ("env", "net", "mdns", "keepalive", "pair")
@@ -333,96 +333,92 @@ def part_mdns():
 # --------------------------------------------------------------------------
 
 class Heartbeat:
-    """Ticks every 0.25 s; a gap means iOS suspended the process.
+    """Ticks every 0.25 s; a pause longer than 3 s means iOS suspended us.
 
-    A second thread asks a-Shell's `isForeground` once a second, so we can tell
-    "alive in the background" apart from "suspended" (no ticks at all).
+    (Probe 1 also polled a-Shell's `isForeground`: on device it never reported
+    the background, so the tests ran to a 120 s cap. Timing is all we use now.)
     """
 
     def __init__(self):
         self.ticks = []
-        self.fg = []                     # (time, True/False)
         self.stop = threading.Event()
-        self.use_fg = _is_foreground() == "yes"
+        self.thread = None
+        self.start = 0.0
 
     def _tick(self):
         while not self.stop.is_set():
             self.ticks.append(time.time())
             time.sleep(0.25)
 
-    def _poll(self):
-        while not self.stop.is_set():
-            try:
-                self.fg.append((time.time(), os.system("isForeground") == 0))
-            except Exception:                                   # noqa: BLE001
-                return
-            time.sleep(1.0)
+    def begin(self):
+        self.start = time.time()
+        self.thread = threading.Thread(target=self._tick, daemon=True)
+        self.thread.start()
+        return self
 
-    def run(self, seconds):
-        start = time.time()
-        threads = [threading.Thread(target=self._tick, daemon=True)]
-        if self.use_fg:
-            threads.append(threading.Thread(target=self._poll, daemon=True))
-        for thread in threads:
-            thread.start()
-        left_seen = False
-        while True:
-            time.sleep(0.5)
-            now = time.time()
-            if self.use_fg and self.fg:
-                if not self.fg[-1][1]:
-                    left_seen = True
-                if now - start >= seconds and self.fg[-1][1] and (left_seen or now - start > 120):
-                    break
-                if now - start > 240:
-                    break
-            elif now - start >= seconds:
-                break
+    def end(self):
         self.stop.set()
-        for thread in threads:
-            thread.join(timeout=3)
-        return self.summary(start)
+        if self.thread is not None:
+            self.thread.join(timeout=3)
+        return self.summary()
 
-    def summary(self, start):
+    def summary(self):
         gaps = []
-        previous = start
+        previous = self.start
         for tick in self.ticks:
-            if tick - previous > 1.5:
-                gaps.append((previous - start, tick - previous))
+            if tick - previous > 3:
+                gaps.append((round(previous - self.start, 1), round(tick - previous, 1)))
             previous = tick
-        background_alive = sum(1 for _t, front in self.fg if not front)
-        return {
-            "seconds": round((self.ticks[-1] if self.ticks else start) - start, 1),
-            "ticks": len(self.ticks),
-            "max_gap": round(max([g for _s, g in gaps] or [0.0]), 1),
-            "gaps": [(round(s, 1), round(g, 1)) for s, g in gaps][:8],
-            "fg_known": self.use_fg,
-            "alive_bg_samples": background_alive,
-        }
+        return {"seconds": round(time.time() - self.start, 1), "ticks": len(self.ticks),
+                "max_gap": max([g for _s, g in gaps] or [0.0]), "gaps": gaps[:8]}
+
+
+def _speak(text):
+    """`say` plays only while we run: hearing it in Settings proves we are alive."""
+    try:
+        return os.system('say "%s"' % text)
+    except Exception as exc:                                    # noqa: BLE001
+        return "error %s" % exc
 
 
 def _report_heartbeat(label, result):
     if result["max_gap"] > 3:
         verdict = "SUSPENDED (longest pause %.1f s)" % result["max_gap"]
-    elif result["fg_known"] and result["alive_bg_samples"] == 0:
-        verdict = "never saw a-Shell in the background (did you leave it?)"
     else:
-        verdict = "KEPT RUNNING"
+        verdict = "KEPT RUNNING (no pause; valid only if you really left a-Shell)"
     kv(label, verdict)
     kv("  details", json.dumps(result))
 
 
-def _settings_trip(label):
+def _trip(label, extra=()):
+    """One Settings trip: 8 s to get ready, then 40 s away, a spoken cue to return."""
     say("")
-    say("  ---- %s ----" % label)
-    say("  When it says NOW: go to the Home Screen, open Settings, stay there")
-    say("  about 30 seconds (count slowly), then come back to a-Shell.")
+    say("  ==== %s ====" % label)
+    for line in extra:
+        say("  " + line)
+    say("  When it says NOW: swipe to the Home Screen, open Settings and wait there.")
+    say("  Come back to a-Shell when you HEAR 'come back', or after ~40 s if you hear nothing.")
     countdown(8, "leave a-Shell")
+    hb = Heartbeat().begin()
+    time.sleep(38)
+    code = _speak("BariStore probe. Come back now.")
+    time.sleep(4)
+    result = hb.end()
+    result["say_exit"] = code
+    return result
+
+
+def _after_trip(result):
+    # Suspended: we only get here once the user is back. Alive: give time to return.
+    wait = 5 if result["max_gap"] > 3 else 20
+    say("  Back in a-Shell? Next step in %d s." % wait)
+    countdown(wait, "next step")
 
 
 def keepalive_none():
-    _settings_trip("Test 1/3: no keep-alive")
-    _report_heartbeat("none", Heartbeat().run(45))
+    result = _trip("Test 1/3: no keep-alive")
+    _report_heartbeat("none", result)
+    _after_trip(result)
 
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
@@ -430,10 +426,11 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <title>BariStore probe</title>
 <style>body{font:18px -apple-system,sans-serif;margin:24px;background:#0A1B4D;color:#fff}
 button{font-size:22px;padding:16px 24px;border-radius:14px;border:0;background:#fff;color:#15337F}
-#msg{margin-top:24px;font-size:20px;line-height:1.4}</style></head><body>
-<h2>BariStore probe</h2>
-<button id="go">Tap to start silent audio</button>
-<div id="msg">Waiting for the tap.</div>
+#msg{margin-top:24px;font-size:24px;line-height:1.4;font-weight:600}</style></head><body>
+<h2>BariStore probe: test 2/3</h2>
+<p>This page plays silence, like the old BariSign page did.</p>
+<button id="go">1. Tap here</button>
+<div id="msg">Then follow the steps that appear here.</div>
 <script>
 const T = location.pathname.replace(/\\/$/, "");
 async function startAudio(){
@@ -445,6 +442,7 @@ async function startAudio(){
     const buf = window.__ac.createBuffer(1, len, window.__ac.sampleRate);
     const src = window.__ac.createBufferSource();
     src.buffer = buf; src.loop = true; src.connect(window.__ac.destination); src.start();
+    document.getElementById("go").style.display = "none";
     await fetch(T + "/ok", {method: "POST", body: window.__ac.state});
   }catch(e){ await fetch(T + "/ok", {method: "POST", body: "error " + e}); }
 }
@@ -462,7 +460,7 @@ def keepalive_page():
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     token = "/" + secrets.token_hex(16)
-    state = {"ok": None, "beats": [], "msg": "Tap the button to start silent audio."}
+    state = {"ok": None, "beats": [], "msg": "Then follow the steps that appear here."}
     ready = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -493,7 +491,7 @@ def keepalive_page():
                 state["ok"] = body
                 ready.set()
             elif self.path == token + "/beat":
-                state["beats"].append((time.time(), body))
+                state["beats"].append(time.time())
             else:
                 self.send_error(404)
                 return
@@ -503,33 +501,40 @@ def keepalive_page():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = "http://127.0.0.1:%d%s/" % (server.server_address[1], token)
     say("")
-    say("  ---- Test 2/3: silent audio in a web page (what the old UI did) ----")
-    say("  A page opens over the terminal. Tap its button, then follow the page.")
+    say("  ==== Test 2/3: silent audio in a web page ====")
+    say("  A page opens over the terminal. Tap its button and follow the page.")
     say("  If no page opens: BROWSER=internalbrowser openurl %s" % url)
     os.environ["BROWSER"] = "internalbrowser"
-    code = os.system("openurl " + url)
-    kv("page openurl exit", code)
+    kv("page openurl exit", os.system("openurl " + url))
     if not ready.wait(120):
         kv("page audio", "never started (no tap within 120 s)")
-        state["msg"] = "Skipped. Close this page now (Done)."
-        time.sleep(15)
         server.shutdown()
         return
     kv("page audio state", state["ok"])
-    state["msg"] = "Audio on. In 8 s: go to Settings, stay ~30 s, come back here."
-    time.sleep(8)
-    state["msg"] = "NOW: go to Settings, stay ~30 s, then come back."
-    hb = Heartbeat()
-    beats_before = len(state["beats"])
-    result = hb.run(45)
+    for left in range(8, 0, -1):
+        state["msg"] = "2. In %d s: go to Settings and wait there until you hear 'come back' (or ~40 s)." % left
+        time.sleep(1)
+    state["msg"] = "NOW: go to Settings. Come back when you hear 'come back' (or after ~40 s)."
+    hb = Heartbeat().begin()
+    before = len(state["beats"])
+    time.sleep(38)
+    code = _speak("BariStore probe. Come back now.")
+    time.sleep(4)
+    result = hb.end()
+    result["say_exit"] = code
     _report_heartbeat("page audio", result)
-    page_beats = [t for t, _s in state["beats"][beats_before:]]
-    page_gap = max([b - a for a, b in zip(page_beats, page_beats[1:])] or [0.0])
-    kv("  page longest pause", "%.1f s (%d page beats)" % (page_gap, len(page_beats)))
-    state["msg"] = "Test done. Close this page now (Done or swipe down). Next test in 20 s."
-    say("  Close the page (Done / swipe down). Next test in 20 s.")
-    time.sleep(20)
+    beats = state["beats"][before:]
+    page_gap = max([b - a for a, b in zip(beats, beats[1:])] or [0.0])
+    kv("  page longest pause", "%.1f s (%d page beats)" % (page_gap, len(beats)))
+    for left in range(20, 0, -1):
+        state["msg"] = ("3. Test 2 done (no error). Close this page now: Done / swipe down. "
+                        "Test 3 starts in %d s." % left)
+        time.sleep(1)
     server.shutdown()
+
+
+SILENCE = os.path.join(DIR, "silence_15min.wav")
+_PLAYING = {"started": False}
 
 
 def _silence_wav(path, seconds):
@@ -542,28 +547,35 @@ def _silence_wav(path, seconds):
         handle.write(b"\x80" * data_len)
 
 
-def start_play(seconds=300):
-    path = os.path.join(DIR, "silence.wav")
-    _silence_wav(path, seconds)
-    code = os.system('play "%s"' % path)
+def start_play():
+    """Start a-Shell's player once per probe run (a second `play` is ignored
+    by a-Shell while the first player is still on screen)."""
+    if _PLAYING["started"]:
+        return "already playing"
+    if not os.path.isfile(SILENCE):
+        _silence_wav(SILENCE, 15 * 60)
+    code = os.system('play "%s"' % SILENCE)
+    _PLAYING["started"] = True
     return code
 
 
 def keepalive_play():
     say("")
-    say("  ---- Test 3/3: a-Shell's own player (play silence.wav) ----")
-    say("  A player opens over the terminal and plays silence. Leave it open.")
+    say("  ==== Test 3/3: a-Shell's own player ====")
+    say("  A FULL-SCREEN player opens and plays 15 min of silence. That is expected.")
+    say("  Do NOT close it (the pair test uses it too). Just swipe to Home as usual.")
     kv("play exit", start_play())
-    time.sleep(3)
-    _settings_trip("Test 3/3: play")
-    _report_heartbeat("play", Heartbeat().run(45))
-    say("  You can close the player now (Done).")
+    time.sleep(4)
+    result = _trip("Test 3/3: play (player on screen)")
+    _report_heartbeat("play", result)
+    _after_trip(result)
 
 
 def part_keepalive():
     header("keepalive")
     say("")
-    say("  Three short tests (~4 min). Each asks you to visit Settings for ~30 s.")
+    say("  Three tests (~4 min). Each one: 8 s to get ready, then ~40 s in Settings.")
+    say("  If you hear 'come back' while in Settings, a-Shell was still running.")
     guarded("none", keepalive_none)
     guarded("page", keepalive_page)
     guarded("play", keepalive_play)
@@ -679,12 +691,13 @@ def part_pair():
     kv("listening", "%s:%d" % (wifi, port))
     kv("instance", "identifier (like idevice/siboot), TTL 75 min")
     say("")
-    say("  ---- Pair entry test (nothing is paired) ----")
-    say("  a-Shell's player keeps us running. Then:")
-    say("  Settings > Privacy & Security > Developer Mode, scroll to the bottom")
-    say("  (or Settings > Developer), look for 'BariStore Probe' and TAP it.")
-    say("  It will fail or spin: that is expected. Come back to a-Shell after.")
-    say("  If you see no entry within 60 s, just come back. (up to 3 min)")
+    say("  ==== Pair entry test (nothing is paired; LocalDevVPN not needed) ====")
+    say("  Needs Wi-Fi. When it says NOW, open Settings and look in BOTH places:")
+    say("    Settings > Privacy & Security > Developer Mode (scroll to the bottom)")
+    say("    Settings > Developer (if you have it)")
+    say("  for 'BariStore Probe'. If you see it, TAP it: it will fail or spin, that")
+    say("  is expected. Note where you saw it (or that you did not).")
+    say("  Come back when you hear 'come back' (at most 2 min).")
     kv("play exit", start_play())
     time.sleep(3)
     start = time.time()
@@ -693,12 +706,10 @@ def part_pair():
         time.sleep(0.2)
     kv("announce sent", json.dumps(sent_ok))
     countdown(5, "go to Settings")
-    hb = Heartbeat()
-    hb_thread = threading.Thread(target=lambda: hb.run(170), daemon=True)
-    hb_thread.start()
+    hb = Heartbeat().begin()
     connection = None
     last_send = time.time()
-    while time.time() - start < 180 and connection is None:
+    while time.time() - start < 120 and connection is None:
         try:
             connection = listener.accept()
         except socket.timeout:
@@ -744,9 +755,8 @@ def part_pair():
         time.sleep(0.2)
     listener.close()
     udp.close()
-    say("  Come back to a-Shell if you are not here yet; the report follows.")
-    hb_thread.join(timeout=240)
-    _report_heartbeat("during pair test", hb.summary(start))
+    _speak("BariStore probe. Pair test over. Come back now.")
+    _report_heartbeat("during pair test", hb.end())
     say("  You can close the player now (Done).")
 
 
