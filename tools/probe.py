@@ -32,7 +32,7 @@ import threading
 import time
 import uuid
 
-PROBE_VERSION = "2"
+PROBE_VERSION = "3"
 DIR = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.join(DIR, "report.txt")
 PARTS = ("env", "net", "mdns", "keepalive", "pair")
@@ -567,6 +567,7 @@ def keepalive_play():
     kv("play exit", start_play())
     time.sleep(4)
     result = _trip("Test 3/3: play (player on screen)")
+    say("  Close the player now (Done): the 'come back' voice may have stopped it.")
     _report_heartbeat("play", result)
     _after_trip(result)
 
@@ -669,47 +670,83 @@ def part_pair():
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("0.0.0.0", 0))
     listener.listen(4)
-    listener.settimeout(0.5)
+    listener.settimeout(0.25)
     port = listener.getsockname()[1]
     packet = announcement(identifier, txt, port, wifi, 75 * 60)
     goodbye = announcement(identifier, txt, port, wifi, 0)
-    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    targets = [MCAST, "255.255.255.255", _subnet_broadcast(wifi)]
-    sent_ok = {}
 
-    def send(data):
-        for target in targets:
+    # Source port 5353 (RFC 6762 §6: answers from other ports may be ignored),
+    # joined to the group so Settings' own queries reach us and get answers.
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (OSError, AttributeError):
+        pass
+    udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    try:
+        udp.bind(("", 5353))
+        kv("udp source", "port 5353")
+    except OSError as exc:
+        kv("udp source", "ephemeral (bind 5353 failed: %s)" % exc)
+    try:
+        udp.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                       socket.inet_aton(MCAST) + socket.inet_aton(wifi))
+    except OSError:
+        pass
+    udp.setblocking(False)
+    targets = [("multicast", MCAST), ("subnet bcast", _subnet_broadcast(wifi)),
+               ("own Wi-Fi IP", wifi), ("loopback", "127.0.0.1")]
+    sent_ok = {}
+    heard = {"packets": 0, "our_queries": 0, "from": set()}
+
+    def send(data, extra=None):
+        for label, target in targets + ([("querier", extra)] if extra else []):
             if not target:
                 continue
             try:
                 udp.sendto(data, (target, 5353))
-                sent_ok[target] = sent_ok.get(target, 0) + 1
+                sent_ok[label] = sent_ok.get(label, 0) + 1
             except OSError:
-                sent_ok.setdefault(target, 0)
+                sent_ok.setdefault(label, 0)
+
+    def listen():
+        while True:
+            try:
+                data, source = udp.recvfrom(9000)
+            except (BlockingIOError, InterruptedError, OSError):
+                return
+            heard["packets"] += 1
+            is_query = len(data) > 3 and not data[2] & 0x80
+            if is_query and b"_remotepairing-pairable-host" in data:
+                heard["our_queries"] += 1
+                heard["from"].add(source[0])
+                send(packet, source[0])
 
     kv("listening", "%s:%d" % (wifi, port))
     kv("instance", "identifier (like idevice/siboot), TTL 75 min")
     say("")
-    say("  ==== Pair entry test (nothing is paired; LocalDevVPN not needed) ====")
-    say("  Needs Wi-Fi. When it says NOW, open Settings and look in BOTH places:")
+    say("  ==== Pair entry test (nothing is paired) ====")
+    say("  LocalDevVPN is NOT used here: Settings finds hosts over Wi-Fi.")
+    say("  If a player from an earlier test is still on screen, close it now.")
+    countdown(10, "starting the player")
+    _PLAYING["started"] = False
+    kv("play exit", start_play())
+    time.sleep(3)
+    say("  When it says NOW: open Settings and look in BOTH places:")
     say("    Settings > Privacy & Security > Developer Mode (scroll to the bottom)")
     say("    Settings > Developer (if you have it)")
     say("  for 'BariStore Probe'. If you see it, TAP it: it will fail or spin, that")
-    say("  is expected. Note where you saw it (or that you did not).")
-    say("  Come back when you hear 'come back' (at most 2 min).")
-    kv("play exit", start_play())
-    time.sleep(3)
-    start = time.time()
+    say("  is expected. Stay in Settings until you hear 'come back' (about 90 s).")
     for _ in range(3):
         send(packet)
         time.sleep(0.2)
-    kv("announce sent", json.dumps(sent_ok))
     countdown(5, "go to Settings")
     hb = Heartbeat().begin()
+    start = time.time()
     connection = None
     last_send = time.time()
-    while time.time() - start < 120 and connection is None:
+    while time.time() - start < 90 and connection is None:
         try:
             connection = listener.accept()
         except socket.timeout:
@@ -717,7 +754,8 @@ def part_pair():
         except OSError as exc:
             kv("accept", "error %s" % exc)
             break
-        if time.time() - last_send > 5:
+        listen()
+        if time.time() - last_send > 3:
             send(packet)
             last_send = time.time()
     if connection is None:
@@ -750,13 +788,16 @@ def part_pair():
         except Exception as exc:                                # noqa: BLE001
             kv("first frame", "error %s" % exc)
         sock.close()
+    kv("announce sent", json.dumps(sent_ok))
+    kv("mDNS heard", "%d packets, %d queries for our type, from %s" % (
+        heard["packets"], heard["our_queries"], sorted(heard["from"]) or "-"))
     for _ in range(2):
         send(goodbye)
         time.sleep(0.2)
     listener.close()
     udp.close()
-    _speak("BariStore probe. Pair test over. Come back now.")
     _report_heartbeat("during pair test", hb.end())
+    _speak("BariStore probe. Pair test over. Come back now.")
     say("  You can close the player now (Done).")
 
 
