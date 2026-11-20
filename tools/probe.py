@@ -32,10 +32,10 @@ import threading
 import time
 import uuid
 
-PROBE_VERSION = "5"
+PROBE_VERSION = "6"
 DIR = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.join(DIR, "report.txt")
-PARTS = ("env", "net", "mdns", "keepalive", "pair")
+PARTS = ("env", "net", "mdns", "keepalive", "pair", "realpair")
 
 _lines = []
 _t0 = time.time()
@@ -883,6 +883,146 @@ def part_pair():
 
 
 # --------------------------------------------------------------------------
+# realpair: the OLD engine that showed the entry on device, plus two fixes
+# --------------------------------------------------------------------------
+
+BIG = {
+    "0": [" ### ", "#   #", "#   #", "#   #", " ### "], "1": ["  #  ", " ##  ", "  #  ", "  #  ", " ### "],
+    "2": [" ### ", "#   #", "  ## ", " #   ", "#####"], "3": ["#### ", "    #", " ### ", "    #", "#### "],
+    "4": ["#  # ", "#  # ", "#####", "   # ", "   # "], "5": ["#####", "#    ", "#### ", "    #", "#### "],
+    "6": [" ### ", "#    ", "#### ", "#   #", " ### "], "7": ["#####", "    #", "   # ", "  #  ", "  #  "],
+    "8": [" ### ", "#   #", " ### ", "#   #", " ### "], "9": [" ### ", "#   #", " ####", "    #", " ### "],
+}
+
+
+def _big(code):
+    for row in range(5):
+        say("    " + "  ".join(BIG[digit][row] for digit in code))
+
+
+def part_realpair():
+    """Old BariSign advertiser + pairing host, unchanged, with:
+    (1) a-Shell's `play` keeping us alive in Settings (proven by probe 2),
+    (2) the code chosen up front and shown BEFORE you leave, so no trip back.
+    A successful run writes a real pairing record (kept private, mode 600)."""
+    header("realpair (old engine + play + code up front)")
+    engine = os.path.join(DIR, "engine")
+    if not os.path.isfile(os.path.join(engine, "raw_mdns.py")):
+        kv("engine", "missing: run through probe.sh (it downloads poc/ files)")
+        return
+    sys.path.insert(0, engine)
+    import asyncio
+    import pairing
+    import raw_mdns
+
+    code = "%06d" % secrets.randbelow(1000000)
+
+    class _FixedCode:
+        """`secrets` for the pairing module, except the PIN is `code`."""
+
+        def __getattr__(self, name):
+            return getattr(secrets, name)
+
+        @staticmethod
+        def randbelow(_limit):
+            return int(code)
+
+    pairing.secrets = _FixedCode()          # the host's PIN is now `code`
+    state_dir = os.path.join(DIR, "state")
+    identity = pairing.HostIdentity.load_or_create(os.path.join(state_dir, "pairing_host.plist"))
+    timeline = []
+
+    def note(text):
+        timeline.append("+%6.1fs %s" % (time.time() - start, text))
+
+    async def run():
+        done = asyncio.get_running_loop().create_future()
+        busy = {"on": False, "tries": 0}
+
+        async def handle(reader, writer):
+            peer = writer.get_extra_info("peername")
+            if done.done() or busy["on"]:
+                note("extra connection from %s ignored" % (peer[0] if peer else "?"))
+                writer.close()
+                return
+            busy["on"] = True
+            busy["tries"] += 1
+            note("iPhone connected from %s (try %d)" % (peer[0] if peer else "?", busy["tries"]))
+            host = pairing.PairableHost(reader, writer, identity, log=note)
+            try:
+                info = await host.accept(lambda _pin: note("code requested by the iPhone"))
+                record = pairing.PairingRecord(identity, info)
+                path = os.path.join(state_dir, "PairingFile_RemoteRP.plist")
+                record.write(path)
+                if not done.done():
+                    done.set_result(info)
+            except Exception as exc:                            # noqa: BLE001
+                note("pairing try failed: %s: %s" % (type(exc).__name__, exc))
+                if busy["tries"] >= 3 and not done.done():
+                    done.set_exception(exc)
+            finally:
+                busy["on"] = False
+                try:
+                    writer.close()
+                except Exception:                               # noqa: BLE001
+                    pass
+
+        probe_server = await asyncio.start_server(handle, "0.0.0.0", 0)
+        port = probe_server.sockets[0].getsockname()[1]
+        probe_server.close()
+        await probe_server.wait_closed()
+        server = await asyncio.start_server(handle, host=None, port=port)
+        advertiser = raw_mdns.Advertiser(identity, port).start()
+        kv("advertising", "%s port %d via %s (5353 bound: %s)" % (
+            advertiser.ipv4, port, advertiser.transports, advertiser.bound))
+        note("advertising as BariSign")
+        try:
+            return await asyncio.wait_for(done, 300)
+        finally:
+            advertiser.stop()
+            server.close()
+            await server.wait_closed()
+
+    say("")
+    say("  ==== Real pairing test (old engine) ====")
+    say("  Keep Wi-Fi and LocalDevVPN ON. If an old player is on screen, close it.")
+    countdown(8, "starting the player")
+    _PLAYING["started"] = False
+    kv("play exit", start_play())
+    time.sleep(3)
+    say("")
+    say("  YOUR PAIRING CODE (remember it, you will NOT need to come back for it):")
+    say("")
+    _big(code)
+    say("")
+    say("     %s %s" % (code[:3], code[3:]))
+    say("")
+    say("  When it says NOW: Settings > Privacy & Security > Developer Mode,")
+    say("  scroll to the bottom, tap 'Pair with BariSign', enter your passcode")
+    say("  if asked, then the code above. Come back when Settings says it paired")
+    say("  (or after ~3 min if nothing shows).")
+    countdown(20, "go to Settings")
+    start = time.time()
+    hb = Heartbeat().begin()
+    try:
+        info = asyncio.run(run())
+        udid = str(info.get("udid", ""))
+        kv("PAIRED", "YES after %.1f s" % (time.time() - start))
+        kv("peer", "udid %s... model %s name %r" % (udid[:8], info.get("model"), info.get("name")))
+        kv("record", "saved in %s (private, do not share)" % state_dir)
+    except asyncio.TimeoutError:
+        kv("PAIRED", "NO: nothing completed within 300 s")
+    except Exception as exc:                                    # noqa: BLE001
+        kv("PAIRED", "NO: %s: %s" % (type(exc).__name__, exc))
+    _report_heartbeat("during real pairing", hb.end())
+    out("  timeline:")
+    for line in timeline[:60]:
+        out("    " + line)
+    _speak("BariStore probe. Pairing test over. Come back now.")
+    say("  You can close the player now (Done).")
+
+
+# --------------------------------------------------------------------------
 
 def main(argv):
     ref = ""
@@ -890,7 +1030,7 @@ def main(argv):
         index = argv.index("--ref")
         ref = argv[index + 1] if index + 1 < len(argv) else ""
         del argv[index:index + 2]
-    wanted = [part for part in argv if part in PARTS] or list(PARTS)
+    wanted = [part for part in argv if part in PARTS] or ["env", "net", "realpair"]
     try:
         os.remove(REPORT)
     except OSError:

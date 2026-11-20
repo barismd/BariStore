@@ -28,4 +28,11 @@ if ! curl -fsSL --max-time 60 -H 'Cache-Control: no-cache' \
     exit 1
 fi
 
+# The old pairing engine, same commit, for the realpair test.
+mkdir -p "$DIR/engine"
+for f in pairing.py raw_mdns.py mdns.py; do
+    curl -fsSL --max-time 60 "https://raw.githubusercontent.com/$REPO/$REF/poc/$f" \
+        -o "$DIR/engine/$f" || echo "warning: could not fetch poc/$f"
+done
+
 python3 "$DIR/probe.py" --ref "$REF" "$@"
