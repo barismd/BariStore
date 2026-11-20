@@ -32,7 +32,7 @@ import threading
 import time
 import uuid
 
-PROBE_VERSION = "4"
+PROBE_VERSION = "5"
 DIR = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.join(DIR, "report.txt")
 PARTS = ("env", "net", "mdns", "keepalive", "pair")
@@ -651,6 +651,68 @@ def announcement(identifier, txt, port, ipv4, ttl):
     return struct.pack(">HHHHHH", 0, 0x8400, 0, len(records), 0, 0) + b"".join(records)
 
 
+def _read_name(data, offset, depth=0):
+    labels = []
+    while offset < len(data) and depth < 20:
+        length = data[offset]
+        if length == 0:
+            return ".".join(labels), offset + 1
+        if length & 0xC0 == 0xC0:
+            pointer = ((length & 0x3F) << 8) | data[offset + 1]
+            name, _end = _read_name(data, pointer, depth + 1)
+            labels.append(name)
+            return ".".join(labels), offset + 2
+        labels.append(data[offset + 1:offset + 1 + length].decode("utf-8", "replace"))
+        offset += 1 + length
+    return ".".join(labels), offset
+
+
+def _mdns_summary(data):
+    """'Q qu=1 _foo._tcp.local' or 'R name' for the first question/answer."""
+    try:
+        flags, qd, an = struct.unpack(">HHH", data[2:8])
+        offset = 12
+        if qd:
+            name, offset = _read_name(data, offset)
+            qclass = struct.unpack(">H", data[offset + 2:offset + 4])[0]
+            kind = "R" if flags & 0x8000 else "Q"
+            return "%s qu=%d %s (+%d q, %d an)" % (kind, qclass >> 15, name, qd - 1, an)
+        if an:
+            name, offset = _read_name(data, offset)
+            return "R %s (%d an)" % (name, an)
+        return "flags=%04x empty" % flags
+    except Exception:                                           # noqa: BLE001
+        return "unparsable %dB" % len(data)
+
+
+IP_RECVDSTADDR = getattr(socket, "IP_RECVDSTADDR", 7)      # Darwin
+IP_PKTINFO = getattr(socket, "IP_PKTINFO", 8)               # Linux (tests)
+
+
+def _enable_dst(sock):
+    try:
+        if sys.platform.startswith("linux"):
+            sock.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
+        else:
+            sock.setsockopt(socket.IPPROTO_IP, IP_RECVDSTADDR, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _recv_with_dst(sock):
+    data, ancillary, _flags, source = sock.recvmsg(9000, 256)
+    dst = "?"
+    for level, kind, payload in ancillary:
+        if level != socket.IPPROTO_IP:
+            continue
+        if kind == IP_PKTINFO and sys.platform.startswith("linux") and len(payload) >= 12:
+            dst = socket.inet_ntoa(payload[8:12])
+        elif kind == IP_RECVDSTADDR and len(payload) >= 4:
+            dst = socket.inet_ntoa(payload[:4])
+    return data, source, dst
+
+
 def part_pair():
     header("pair (advertise only)")
     wifi = _route_ip("8.8.8.8")
@@ -694,12 +756,13 @@ def part_pair():
                        socket.inet_aton(MCAST) + socket.inet_aton(wifi))
     except OSError:
         pass
+    kv("dst address option", "on" if _enable_dst(udp) else "unavailable")
     udp.setblocking(False)
     targets = [("multicast", MCAST), ("subnet bcast", _subnet_broadcast(wifi)),
                ("own Wi-Fi IP", wifi), ("loopback", "127.0.0.1"),
                ("LocalDevVPN 10.7.0.1", "10.7.0.1")]
     sent_ok = {}
-    heard = {"packets": 0, "our_queries": 0, "from": set()}
+    heard = {"packets": 0, "our_queries": 0, "from": set(), "kinds": {}, "log": []}
 
     def send(data, extra=None):
         for label, target in targets + ([("querier", extra)] if extra else []):
@@ -714,10 +777,17 @@ def part_pair():
     def listen():
         while True:
             try:
-                data, source = udp.recvfrom(9000)
+                data, source, dst = _recv_with_dst(udp)
             except (BlockingIOError, InterruptedError, OSError):
                 return
             heard["packets"] += 1
+            own = data == packet or data == goodbye
+            summary = "own announcement" if own else _mdns_summary(data)
+            key = "%s -> %s : %s" % (source[0], dst, summary if not own else "own")
+            heard["kinds"][key] = heard["kinds"].get(key, 0) + 1
+            if len(heard["log"]) < 30 and not own:
+                heard["log"].append("+%5.1fs %s:%d -> %s  %s" % (
+                    time.time() - start, source[0], source[1], dst, summary))
             is_query = len(data) > 3 and not data[2] & 0x80
             if is_query and b"_remotepairing-pairable-host" in data:
                 heard["our_queries"] += 1
@@ -735,11 +805,14 @@ def part_pair():
     _PLAYING["started"] = False
     kv("play exit", start_play())
     time.sleep(3)
-    say("  When it says NOW: open Settings and look in BOTH places:")
-    say("    Settings > Privacy & Security > Developer Mode (scroll to the bottom)")
-    say("    Settings > Developer (if you have it)")
-    say("  for 'BariStore Probe'. If you see it, TAP it: it will fail or spin, that")
-    say("  is expected. Stay in Settings until you hear 'come back' (about 90 s).")
+    say("  BEFORE NOW: in Settings go back to its first page (so the Developer Mode")
+    say("  page is closed). When it says NOW:")
+    say("    1. Settings > Privacy & Security > Developer Mode, scroll to the bottom.")
+    say("    2. Go back one page, open Developer Mode again. Repeat 3 times,")
+    say("       ~10 s apart (each opening starts a new search for hosts).")
+    say("  If 'BariStore Probe' appears, TAP it (it will fail: expected).")
+    say("  Stay in Settings until you hear 'come back' (about 90 s).")
+    start = time.time()
     for _ in range(3):
         send(packet)
         time.sleep(0.2)
@@ -757,7 +830,7 @@ def part_pair():
             kv("accept", "error %s" % exc)
             break
         listen()
-        if time.time() - last_send > 3:
+        if time.time() - last_send > 0.5:
             send(packet)
             last_send = time.time()
     if connection is None:
@@ -793,6 +866,12 @@ def part_pair():
     kv("announce sent", json.dumps(sent_ok))
     kv("mDNS heard", "%d packets, %d queries for our type, from %s" % (
         heard["packets"], heard["our_queries"], sorted(heard["from"]) or "-"))
+    out("  packet kinds (source -> destination : what, count):")
+    for key, count in sorted(heard["kinds"].items(), key=lambda item: -item[1])[:25]:
+        out("    %4d  %s" % (count, key))
+    out("  first packets that were not ours:")
+    for line in heard["log"]:
+        out("    " + line)
     for _ in range(2):
         send(goodbye)
         time.sleep(0.2)
