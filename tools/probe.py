@@ -32,7 +32,7 @@ import threading
 import time
 import uuid
 
-PROBE_VERSION = "3"
+PROBE_VERSION = "4"
 DIR = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.join(DIR, "report.txt")
 PARTS = ("env", "net", "mdns", "keepalive", "pair")
@@ -696,7 +696,8 @@ def part_pair():
         pass
     udp.setblocking(False)
     targets = [("multicast", MCAST), ("subnet bcast", _subnet_broadcast(wifi)),
-               ("own Wi-Fi IP", wifi), ("loopback", "127.0.0.1")]
+               ("own Wi-Fi IP", wifi), ("loopback", "127.0.0.1"),
+               ("LocalDevVPN 10.7.0.1", "10.7.0.1")]
     sent_ok = {}
     heard = {"packets": 0, "our_queries": 0, "from": set()}
 
@@ -724,10 +725,11 @@ def part_pair():
                 send(packet, source[0])
 
     kv("listening", "%s:%d" % (wifi, port))
+    kv("route to 10.7.0.1", _route_ip("10.7.0.1"))
     kv("instance", "identifier (like idevice/siboot), TTL 75 min")
     say("")
     say("  ==== Pair entry test (nothing is paired) ====")
-    say("  LocalDevVPN is NOT used here: Settings finds hosts over Wi-Fi.")
+    say("  Keep LocalDevVPN ON and Wi-Fi ON for this test.")
     say("  If a player from an earlier test is still on screen, close it now.")
     countdown(10, "starting the player")
     _PLAYING["started"] = False
