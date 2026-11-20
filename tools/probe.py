@@ -1,0 +1,782 @@
+#!/usr/bin/env python3
+# =============================================================================
+#  BariStore device probe (MIT)
+#
+#  Facts we need from the real iPhone/iPad before writing product code.
+#  Run through tools/probe.sh (one curl | sh line). Never reads stdin: every
+#  step is driven by time or by taps on a page, so it works under a pipe.
+#
+#  Parts (default: all, in this order):
+#    env        Python, cryptography, TLS store, writable folders, commands
+#    net        Wi-Fi/VPN addresses, interfaces, DNS/TCP/TLS to the hosts we use,
+#               LocalDevVPN loopback ports
+#    mdns       what raw mDNS sockets may do (bind 5353, multicast, broadcast)
+#    keepalive  does a-Shell keep running in Settings? (none / page audio / play)
+#    pair       advertise a "Pair with BariStore Probe" entry; does iOS dial in?
+#
+#  Nothing here signs in, pairs for real, installs or deletes anything.
+#  The report never contains Apple ID data (none is asked for).
+# =============================================================================
+
+import json
+import os
+import platform
+import random
+import secrets
+import shutil
+import socket
+import ssl
+import struct
+import sys
+import threading
+import time
+import uuid
+
+PROBE_VERSION = "1"
+DIR = os.path.dirname(os.path.abspath(__file__))
+REPORT = os.path.join(DIR, "report.txt")
+PARTS = ("env", "net", "mdns", "keepalive", "pair")
+
+_lines = []
+_t0 = time.time()
+
+
+def out(text=""):
+    line = str(text)
+    print(line, flush=True)
+    _lines.append(line)
+    try:
+        with open(REPORT, "a") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+
+
+def say(text=""):
+    """Instructions for the user: shown, not stored in the report."""
+    print(text, flush=True)
+
+
+def kv(key, value):
+    out("  %-22s %s" % (key, value))
+
+
+def header(title):
+    out("")
+    out("== %s ==" % title)
+
+
+def guarded(name, func):
+    try:
+        func()
+    except Exception as exc:                                    # noqa: BLE001
+        out("  !! %s crashed: %s: %s" % (name, type(exc).__name__, exc))
+
+
+def countdown(seconds, text):
+    for left in range(seconds, 0, -1):
+        print("\r  %s in %2d s " % (text, left), end="", flush=True)
+        time.sleep(1)
+    print("\r  %s NOW.%s" % (text, " " * 12), flush=True)
+
+
+# --------------------------------------------------------------------------
+# env
+# --------------------------------------------------------------------------
+
+def _writable(path):
+    if not os.path.isdir(path):
+        return "missing"
+    try:
+        probe = os.path.join(path, ".baristore_probe_%d" % os.getpid())
+        with open(probe, "w") as handle:
+            handle.write("x")
+        os.remove(probe)
+        return "writable"
+    except OSError as exc:
+        return "NO (%s)" % (exc.strerror or exc)
+
+
+def part_env():
+    header("env")
+    kv("probe", PROBE_VERSION)
+    kv("python", sys.version.replace("\n", " "))
+    kv("sys.platform", sys.platform)
+    kv("platform", platform.platform())
+    try:
+        uname = os.uname()
+        kv("machine", uname.machine)
+        kv("kernel", "%s %s" % (uname.sysname, uname.release))
+    except Exception as exc:                                    # noqa: BLE001
+        kv("uname", "error %s" % exc)
+    ios_ver = getattr(platform, "ios_ver", None)
+    if ios_ver:
+        try:
+            info = ios_ver()
+            kv("ios_ver", "%s %s model=%s simulator=%s" % (
+                info.system, info.release, info.model, info.is_simulator))
+        except Exception as exc:                                # noqa: BLE001
+            kv("ios_ver", "error %s" % exc)
+    kv("TERM_PROGRAM", os.environ.get("TERM_PROGRAM", "-"))
+    kv("HOME", os.environ.get("HOME", "-"))
+    kv("cwd", os.getcwd())
+    try:
+        import cryptography
+        kv("cryptography", cryptography.__version__)
+        from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        ed25519.Ed25519PrivateKey.generate()
+        x25519.X25519PrivateKey.generate()
+        ChaCha20Poly1305(os.urandom(32))
+        kv("crypto primitives", "ed25519 x25519 chacha20poly1305 ok")
+    except Exception as exc:                                    # noqa: BLE001
+        kv("cryptography", "ERROR %s: %s" % (type(exc).__name__, exc))
+    kv("openssl", ssl.OPENSSL_VERSION)
+    try:
+        kv("default CA store", ssl.create_default_context().cert_store_stats())
+        paths = ssl.get_default_verify_paths()
+        kv("verify paths", "cafile=%s capath=%s" % (paths.cafile, paths.capath))
+    except Exception as exc:                                    # noqa: BLE001
+        kv("default CA store", "error %s" % exc)
+    try:
+        import certifi
+        kv("certifi", "installed %s" % certifi.__version__)
+    except ImportError:
+        kv("certifi", "not installed")
+    home = os.path.expanduser("~")
+    for label, path in (("~", home), ("~/Documents", os.path.join(home, "Documents")),
+                        ("~/Library", os.path.join(home, "Library")),
+                        ("~/Library/Caches", os.path.join(home, "Library", "Caches")),
+                        ("~/tmp", os.path.join(home, "tmp"))):
+        kv("write " + label, _writable(path))
+    found = []
+    for name in ("play", "say", "openurl", "pbcopy", "pbpaste", "isForeground",
+                 "view", "curl", "pip", "wasm", "jsc"):
+        found.append("%s=%s" % (name, "yes" if shutil.which(name) else "no"))
+    kv("which", " ".join(found))
+    kv("isForeground now", _is_foreground())
+
+
+def _is_foreground():
+    """a-Shell's own command: exit 0 when this window is in front."""
+    try:
+        code = os.system("isForeground")
+    except Exception as exc:                                    # noqa: BLE001
+        return "error %s" % exc
+    return "yes" if code == 0 else "no (exit %s)" % code
+
+
+# --------------------------------------------------------------------------
+# net
+# --------------------------------------------------------------------------
+
+def _route_ip(target):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect((target, 9))
+        return sock.getsockname()[0]
+    except OSError as exc:
+        return "none (%s)" % (exc.strerror or exc)
+    finally:
+        sock.close()
+
+
+def _tcp(host, port, timeout=4.0):
+    start = time.time()
+    try:
+        sock = socket.create_connection((host, port), timeout)
+        sock.close()
+        return "open %.0f ms" % ((time.time() - start) * 1000)
+    except OSError as exc:
+        return "closed (%s)" % (exc.strerror or type(exc).__name__)
+
+
+def _tls(host):
+    start = time.time()
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((host, 443), 6) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                return "verified %s %.0f ms" % (tls.version(), (time.time() - start) * 1000)
+    except ssl.SSLCertVerificationError as exc:
+        return "handshake ok, verify FAILED (%s)" % exc.verify_message
+    except Exception as exc:                                    # noqa: BLE001
+        return "error %s: %s" % (type(exc).__name__, exc)
+
+
+def part_net():
+    header("net")
+    kv("route to internet", _route_ip("8.8.8.8"))
+    kv("route to 10.7.0.1", _route_ip("10.7.0.1"))
+    try:
+        names = [name for _i, name in socket.if_nameindex()]
+        kv("interfaces", " ".join(names))
+    except Exception as exc:                                    # noqa: BLE001
+        kv("interfaces", "error %s" % exc)
+    for host in ("gsa.apple.com", "developerservices2.apple.com", "mac-ani.jkcoxson.com",
+                 "ani.sidestore.io", "api.github.com", "raw.githubusercontent.com"):
+        try:
+            address = socket.getaddrinfo(host, 443, socket.AF_INET)[0][4][0]
+        except OSError as exc:
+            kv(host, "DNS failed (%s)" % exc)
+            continue
+        kv(host, "%s tcp %s" % (address, _tcp(host, 443)))
+    kv("TLS default store", "gsa.apple.com: %s" % _tls("gsa.apple.com"))
+
+    results = {}
+
+    def check(port):
+        results[port] = _tcp("10.7.0.1", port, 1.5).startswith("open")
+
+    threads = [threading.Thread(target=check, args=(port,)) for port in range(49152, 49216)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    open_ports = sorted(port for port, ok in results.items() if ok)
+    kv("10.7.0.1 open ports", open_ports or "none (LocalDevVPN off, or nothing listens)")
+    for port in open_ports[:3]:
+        kv("10.7.0.1:%d first bytes" % port, _peek("10.7.0.1", port))
+
+
+def _peek(host, port):
+    try:
+        sock = socket.create_connection((host, port), 2)
+        sock.settimeout(2)
+        try:
+            data = sock.recv(64)
+        except socket.timeout:
+            data = b""
+        sock.close()
+        return data[:32].hex() if data else "silent (waits for the client)"
+    except OSError as exc:
+        return "error %s" % exc
+
+
+# --------------------------------------------------------------------------
+# mdns
+# --------------------------------------------------------------------------
+
+MCAST = "224.0.0.251"
+
+
+def _subnet_broadcast(ipv4):
+    parts = ipv4.split(".")
+    if len(parts) != 4 or not all(part.isdigit() for part in parts):
+        return ""
+    return "%s.%s.%s.255" % tuple(parts[:3])
+
+
+def _query_packet():
+    """A harmless PTR query for a name nobody owns."""
+    name = b"".join(bytes([len(label)]) + label for label in
+                    (b"_baristoreprobe", b"_tcp", b"local")) + b"\x00"
+    return struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + name + struct.pack(">HH", 12, 1)
+
+
+def part_mdns():
+    header("mdns")
+    wifi = _route_ip("8.8.8.8")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        kv("SO_REUSEPORT", "ok")
+    except (OSError, AttributeError) as exc:
+        kv("SO_REUSEPORT", "no (%s)" % exc)
+    try:
+        sock.bind(("", 5353))
+        kv("bind :5353", "ok")
+        bound = True
+    except OSError as exc:
+        kv("bind :5353", "no (%s)" % (exc.strerror or exc))
+        bound = False
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        kv("SO_BROADCAST", "ok")
+    except OSError as exc:
+        kv("SO_BROADCAST", "no (%s)" % exc)
+    if bound:
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                            socket.inet_aton(MCAST) + socket.inet_aton(wifi))
+            kv("join 224.0.0.251", "ok")
+        except OSError as exc:
+            kv("join 224.0.0.251", "no (%s)" % (exc.strerror or exc))
+    packet = _query_packet()
+    for label, address in (("send multicast", MCAST), ("send 255.255.255.255", "255.255.255.255"),
+                           ("send subnet bcast", _subnet_broadcast(wifi))):
+        if not address:
+            kv(label, "skipped (no Wi-Fi IPv4)")
+            continue
+        try:
+            sock.sendto(packet, (address, 5353))
+            kv(label, "ok -> %s" % address)
+        except OSError as exc:
+            kv(label, "no (%s)" % (exc.strerror or exc))
+    if bound:
+        sock.settimeout(0.5)
+        seen = 0
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            try:
+                sock.recvfrom(9000)
+                seen += 1
+            except (socket.timeout, OSError):
+                pass
+        kv("mDNS packets heard 3s", seen)
+    sock.close()
+
+
+# --------------------------------------------------------------------------
+# keepalive
+# --------------------------------------------------------------------------
+
+class Heartbeat:
+    """Ticks every 0.25 s; a gap means iOS suspended the process.
+
+    A second thread asks a-Shell's `isForeground` once a second, so we can tell
+    "alive in the background" apart from "suspended" (no ticks at all).
+    """
+
+    def __init__(self):
+        self.ticks = []
+        self.fg = []                     # (time, True/False)
+        self.stop = threading.Event()
+        self.use_fg = _is_foreground() == "yes"
+
+    def _tick(self):
+        while not self.stop.is_set():
+            self.ticks.append(time.time())
+            time.sleep(0.25)
+
+    def _poll(self):
+        while not self.stop.is_set():
+            try:
+                self.fg.append((time.time(), os.system("isForeground") == 0))
+            except Exception:                                   # noqa: BLE001
+                return
+            time.sleep(1.0)
+
+    def run(self, seconds):
+        start = time.time()
+        threads = [threading.Thread(target=self._tick, daemon=True)]
+        if self.use_fg:
+            threads.append(threading.Thread(target=self._poll, daemon=True))
+        for thread in threads:
+            thread.start()
+        left_seen = False
+        while True:
+            time.sleep(0.5)
+            now = time.time()
+            if self.use_fg and self.fg:
+                if not self.fg[-1][1]:
+                    left_seen = True
+                if now - start >= seconds and self.fg[-1][1] and (left_seen or now - start > 120):
+                    break
+                if now - start > 240:
+                    break
+            elif now - start >= seconds:
+                break
+        self.stop.set()
+        for thread in threads:
+            thread.join(timeout=3)
+        return self.summary(start)
+
+    def summary(self, start):
+        gaps = []
+        previous = start
+        for tick in self.ticks:
+            if tick - previous > 1.5:
+                gaps.append((previous - start, tick - previous))
+            previous = tick
+        background_alive = sum(1 for _t, front in self.fg if not front)
+        return {
+            "seconds": round((self.ticks[-1] if self.ticks else start) - start, 1),
+            "ticks": len(self.ticks),
+            "max_gap": round(max([g for _s, g in gaps] or [0.0]), 1),
+            "gaps": [(round(s, 1), round(g, 1)) for s, g in gaps][:8],
+            "fg_known": self.use_fg,
+            "alive_bg_samples": background_alive,
+        }
+
+
+def _report_heartbeat(label, result):
+    if result["max_gap"] > 3:
+        verdict = "SUSPENDED (longest pause %.1f s)" % result["max_gap"]
+    elif result["fg_known"] and result["alive_bg_samples"] == 0:
+        verdict = "never saw a-Shell in the background (did you leave it?)"
+    else:
+        verdict = "KEPT RUNNING"
+    kv(label, verdict)
+    kv("  details", json.dumps(result))
+
+
+def _settings_trip(label):
+    say("")
+    say("  ---- %s ----" % label)
+    say("  When it says NOW: go to the Home Screen, open Settings, stay there")
+    say("  about 30 seconds (count slowly), then come back to a-Shell.")
+    countdown(8, "leave a-Shell")
+
+
+def keepalive_none():
+    _settings_trip("Test 1/3: no keep-alive")
+    _report_heartbeat("none", Heartbeat().run(45))
+
+
+PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BariStore probe</title>
+<style>body{font:18px -apple-system,sans-serif;margin:24px;background:#0A1B4D;color:#fff}
+button{font-size:22px;padding:16px 24px;border-radius:14px;border:0;background:#fff;color:#15337F}
+#msg{margin-top:24px;font-size:20px;line-height:1.4}</style></head><body>
+<h2>BariStore probe</h2>
+<button id="go">Tap to start silent audio</button>
+<div id="msg">Waiting for the tap.</div>
+<script>
+const T = location.pathname.replace(/\\/$/, "");
+async function startAudio(){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    window.__ac = window.__ac || new AC();
+    if (window.__ac.state === "suspended") await window.__ac.resume();
+    const len = window.__ac.sampleRate;
+    const buf = window.__ac.createBuffer(1, len, window.__ac.sampleRate);
+    const src = window.__ac.createBufferSource();
+    src.buffer = buf; src.loop = true; src.connect(window.__ac.destination); src.start();
+    await fetch(T + "/ok", {method: "POST", body: window.__ac.state});
+  }catch(e){ await fetch(T + "/ok", {method: "POST", body: "error " + e}); }
+}
+document.getElementById("go").onclick = startAudio;
+setInterval(async () => {
+  try{
+    await fetch(T + "/beat", {method: "POST", body: window.__ac ? window.__ac.state : "none"});
+    const r = await fetch(T + "/msg"); document.getElementById("msg").textContent = await r.text();
+  }catch(e){}
+}, 1000);
+</script></body></html>"""
+
+
+def keepalive_page():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    token = "/" + secrets.token_hex(16)
+    state = {"ok": None, "beats": [], "msg": "Tap the button to start silent audio."}
+    ready = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def _send(self, body, kind="text/plain"):
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", kind + "; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path in (token, token + "/"):
+                self._send(PAGE, "text/html")
+            elif self.path == token + "/msg":
+                self._send(state["msg"])
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode(errors="replace") if length else ""
+            if self.path == token + "/ok":
+                state["ok"] = body
+                ready.set()
+            elif self.path == token + "/beat":
+                state["beats"].append((time.time(), body))
+            else:
+                self.send_error(404)
+                return
+            self._send("ok")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d%s/" % (server.server_address[1], token)
+    say("")
+    say("  ---- Test 2/3: silent audio in a web page (what the old UI did) ----")
+    say("  A page opens over the terminal. Tap its button, then follow the page.")
+    say("  If no page opens: BROWSER=internalbrowser openurl %s" % url)
+    os.environ["BROWSER"] = "internalbrowser"
+    code = os.system("openurl " + url)
+    kv("page openurl exit", code)
+    if not ready.wait(120):
+        kv("page audio", "never started (no tap within 120 s)")
+        state["msg"] = "Skipped. Close this page now (Done)."
+        time.sleep(15)
+        server.shutdown()
+        return
+    kv("page audio state", state["ok"])
+    state["msg"] = "Audio on. In 8 s: go to Settings, stay ~30 s, come back here."
+    time.sleep(8)
+    state["msg"] = "NOW: go to Settings, stay ~30 s, then come back."
+    hb = Heartbeat()
+    beats_before = len(state["beats"])
+    result = hb.run(45)
+    _report_heartbeat("page audio", result)
+    page_beats = [t for t, _s in state["beats"][beats_before:]]
+    page_gap = max([b - a for a, b in zip(page_beats, page_beats[1:])] or [0.0])
+    kv("  page longest pause", "%.1f s (%d page beats)" % (page_gap, len(page_beats)))
+    state["msg"] = "Test done. Close this page now (Done or swipe down). Next test in 20 s."
+    say("  Close the page (Done / swipe down). Next test in 20 s.")
+    time.sleep(20)
+    server.shutdown()
+
+
+def _silence_wav(path, seconds):
+    rate = 8000
+    data_len = rate * seconds
+    with open(path, "wb") as handle:
+        handle.write(b"RIFF" + struct.pack("<I", 36 + data_len) + b"WAVEfmt ")
+        handle.write(struct.pack("<IHHIIHH", 16, 1, 1, rate, rate, 1, 8))
+        handle.write(b"data" + struct.pack("<I", data_len))
+        handle.write(b"\x80" * data_len)
+
+
+def start_play(seconds=300):
+    path = os.path.join(DIR, "silence.wav")
+    _silence_wav(path, seconds)
+    code = os.system('play "%s"' % path)
+    return code
+
+
+def keepalive_play():
+    say("")
+    say("  ---- Test 3/3: a-Shell's own player (play silence.wav) ----")
+    say("  A player opens over the terminal and plays silence. Leave it open.")
+    kv("play exit", start_play())
+    time.sleep(3)
+    _settings_trip("Test 3/3: play")
+    _report_heartbeat("play", Heartbeat().run(45))
+    say("  You can close the player now (Done).")
+
+
+def part_keepalive():
+    header("keepalive")
+    say("")
+    say("  Three short tests (~4 min). Each asks you to visit Settings for ~30 s.")
+    guarded("none", keepalive_none)
+    guarded("page", keepalive_page)
+    guarded("play", keepalive_play)
+
+
+# --------------------------------------------------------------------------
+# pair (advertise only; no pairing happens)
+# --------------------------------------------------------------------------
+
+def siphash24(key, data):
+    """SipHash-2-4 (public-domain algorithm), returns a u64."""
+    mask = (1 << 64) - 1
+    k0, k1 = struct.unpack("<QQ", key)
+    v = [k0 ^ 0x736F6D6570736575, k1 ^ 0x646F72616E646F6D,
+         k0 ^ 0x6C7967656E657261, k1 ^ 0x7465646279746573]
+
+    def rotl(value, bits):
+        return ((value << bits) | (value >> (64 - bits))) & mask
+
+    def rounds(count):
+        for _ in range(count):
+            v[0] = (v[0] + v[1]) & mask
+            v[1] = rotl(v[1], 13) ^ v[0]
+            v[0] = rotl(v[0], 32)
+            v[2] = (v[2] + v[3]) & mask
+            v[3] = rotl(v[3], 16) ^ v[2]
+            v[0] = (v[0] + v[3]) & mask
+            v[3] = rotl(v[3], 21) ^ v[0]
+            v[2] = (v[2] + v[1]) & mask
+            v[1] = rotl(v[1], 17) ^ v[2]
+            v[2] = rotl(v[2], 32)
+
+    length = len(data)
+    end = length - (length % 8)
+    for offset in range(0, end, 8):
+        m = struct.unpack_from("<Q", data, offset)[0]
+        v[3] ^= m
+        rounds(2)
+        v[0] ^= m
+    last = (length & 0xFF) << 56
+    for index in range(length - end):
+        last |= data[end + index] << (8 * index)
+    v[3] ^= last
+    rounds(2)
+    v[0] ^= last
+    v[2] ^= 0xFF
+    rounds(4)
+    return (v[0] ^ v[1] ^ v[2] ^ v[3]) & mask
+
+
+def _dns_name(text):
+    return b"".join(bytes([len(label.encode())]) + label.encode()
+                    for label in text.rstrip(".").split(".")) + b"\x00"
+
+
+def _rr(name, rtype, rclass, ttl, rdata):
+    return _dns_name(name) + struct.pack(">HHIH", rtype, rclass, ttl, len(rdata)) + rdata
+
+
+def announcement(identifier, txt, port, ipv4, ttl):
+    service = "_remotepairing-pairable-host._tcp.local"
+    instance = "%s.%s" % (identifier, service)
+    host = "baristore-probe.local"
+    items = [("%s=%s" % pair).encode() for pair in txt.items()]
+    txt_raw = b"".join(bytes([len(item)]) + item for item in items)
+    records = [
+        _rr(service, 12, 1, ttl, _dns_name(instance)),
+        _rr(instance, 33, 0x8001, ttl, struct.pack(">HHH", 0, 0, port) + _dns_name(host)),
+        _rr(instance, 16, 0x8001, ttl, txt_raw),
+        _rr(host, 1, 0x8001, ttl, socket.inet_aton(ipv4)),
+    ]
+    return struct.pack(">HHHHHH", 0, 0x8400, 0, len(records), 0, 0) + b"".join(records)
+
+
+def part_pair():
+    header("pair (advertise only)")
+    wifi = _route_ip("8.8.8.8")
+    if not wifi or wifi.startswith(("none", "127.", "169.254.")):
+        kv("wifi", "no Wi-Fi IPv4 (%s): skipped" % wifi)
+        return
+    identifier = str(uuid.uuid4()).upper()
+    alt_irk = os.urandom(16)
+    tag = struct.pack("<Q", siphash24(alt_irk, identifier.encode()))
+    import base64
+    txt = {
+        "name": "BariStore Probe", "identifier": identifier,
+        "authTag": base64.b64encode(bytes(tag[5 - i] for i in range(6))).decode(),
+        "model": "Mac17,7", "flags": "1", "ver": "26", "minVer": "17",
+    }
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("0.0.0.0", 0))
+    listener.listen(4)
+    listener.settimeout(0.5)
+    port = listener.getsockname()[1]
+    packet = announcement(identifier, txt, port, wifi, 75 * 60)
+    goodbye = announcement(identifier, txt, port, wifi, 0)
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    targets = [MCAST, "255.255.255.255", _subnet_broadcast(wifi)]
+    sent_ok = {}
+
+    def send(data):
+        for target in targets:
+            if not target:
+                continue
+            try:
+                udp.sendto(data, (target, 5353))
+                sent_ok[target] = sent_ok.get(target, 0) + 1
+            except OSError:
+                sent_ok.setdefault(target, 0)
+
+    kv("listening", "%s:%d" % (wifi, port))
+    kv("instance", "identifier (like idevice/siboot), TTL 75 min")
+    say("")
+    say("  ---- Pair entry test (nothing is paired) ----")
+    say("  a-Shell's player keeps us running. Then:")
+    say("  Settings > Privacy & Security > Developer Mode, scroll to the bottom")
+    say("  (or Settings > Developer), look for 'BariStore Probe' and TAP it.")
+    say("  It will fail or spin: that is expected. Come back to a-Shell after.")
+    say("  If you see no entry within 60 s, just come back. (up to 3 min)")
+    kv("play exit", start_play())
+    time.sleep(3)
+    start = time.time()
+    for _ in range(3):
+        send(packet)
+        time.sleep(0.2)
+    kv("announce sent", json.dumps(sent_ok))
+    countdown(5, "go to Settings")
+    hb = Heartbeat()
+    hb_thread = threading.Thread(target=lambda: hb.run(170), daemon=True)
+    hb_thread.start()
+    connection = None
+    last_send = time.time()
+    while time.time() - start < 180 and connection is None:
+        try:
+            connection = listener.accept()
+        except socket.timeout:
+            pass
+        except OSError as exc:
+            kv("accept", "error %s" % exc)
+            break
+        if time.time() - last_send > 5:
+            send(packet)
+            last_send = time.time()
+    if connection is None:
+        kv("iOS dialled in", "NO within %.0f s" % (time.time() - start))
+    else:
+        sock, peer = connection
+        kv("iOS dialled in", "YES after %.1f s from %s" % (time.time() - start, peer[0]))
+        sock.settimeout(5)
+        try:
+            data = b""
+            while len(data) < 11:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            if data[:9] == b"RPPairing":
+                length = struct.unpack(">H", data[9:11])[0]
+                while len(data) < 11 + length:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                body = json.loads(data[11:11 + length])
+                plain = body.get("message", {}).get("plain", {}).get("_0", {})
+                hs = plain.get("request", {}).get("_0", {}).get("handshake", {}).get("_0", {})
+                kv("first frame", "RPPairing handshake wire=%s options=%s" % (
+                    hs.get("wireProtocolVersion"), json.dumps(hs.get("hostOptions"))))
+            else:
+                kv("first frame", "not RPPairing: %r" % data[:24])
+        except Exception as exc:                                # noqa: BLE001
+            kv("first frame", "error %s" % exc)
+        sock.close()
+    for _ in range(2):
+        send(goodbye)
+        time.sleep(0.2)
+    listener.close()
+    udp.close()
+    say("  Come back to a-Shell if you are not here yet; the report follows.")
+    hb_thread.join(timeout=240)
+    _report_heartbeat("during pair test", hb.summary(start))
+    say("  You can close the player now (Done).")
+
+
+# --------------------------------------------------------------------------
+
+def main(argv):
+    ref = ""
+    if "--ref" in argv:
+        index = argv.index("--ref")
+        ref = argv[index + 1] if index + 1 < len(argv) else ""
+        del argv[index:index + 2]
+    wanted = [part for part in argv if part in PARTS] or list(PARTS)
+    try:
+        os.remove(REPORT)
+    except OSError:
+        pass
+    out("BariStore probe %s  ref=%s  %s" % (PROBE_VERSION, ref[:12] or "-",
+                                             time.strftime("%Y-%m-%d %H:%M:%S %z")))
+    out("parts: %s" % " ".join(wanted))
+    for part in wanted:
+        guarded(part, globals()["part_" + part])
+    out("")
+    out("done in %.0f s" % (time.time() - _t0))
+    copied = os.system('pbcopy < "%s"' % REPORT) == 0
+    say("")
+    say("  Report: %s" % REPORT)
+    say("  %s" % ("Copied to the clipboard: paste it into the chat."
+                  if copied else "Open it in Files > a-Shell > baristore_probe and share it."))
+
+
+if __name__ == "__main__":
+    random.seed()
+    main(sys.argv[1:])
