@@ -46,3 +46,5 @@ codegen-units = 4
 [dev-dependencies]
 # The SRP fork jkcoxson/idevice uses with real iPhones: an oracle for ours.
 idevice-srp = "0.6"
+# An independent TCP/IPv6 implementation playing the iPhone's side in tests.
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv6", "socket-tcp"] }

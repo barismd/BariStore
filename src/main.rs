@@ -1,3 +1,4 @@
+mod device;
 mod log;
 mod minis;
 mod pairing;
@@ -53,6 +54,21 @@ async fn dev(args: &[String]) -> Result<(), String> {
             let peer = pairing::host::PairableHost::new(stream, &identity, "BariStore", &log)
                 .accept(code).await.map_err(|e| e.to_string())?;
             println!("paired: udid={} model={} name={}", peer.udid, peer.model, peer.name);
+            Ok(())
+        }
+        Some("tunnel") => {
+            // Through CDTunnel against BARISTORE_DEVICE, then one raw packet.
+            let record = pairing::record::PairingRecord {
+                host: pairing::record::HostIdentity::generate(),
+                peer: Default::default(),
+            };
+            let tunnel = device::session::Tunnel::open(&record).await.map_err(|e| e.to_string())?;
+            println!("tunnel: {} -> {} rsd {}", tunnel.client, tunnel.server, tunnel.rsd_port);
+            match tokio::time::timeout(std::time::Duration::from_secs(5), tunnel.stack.connect(tunnel.rsd_port)).await {
+                Ok(Err(e)) => println!("tcp over the echo link: {e}"),
+                Ok(Ok(_)) => println!("tcp over the echo link: connected"),
+                Err(_) => println!("tcp over the echo link: no answer (expected from an echo)"),
+            }
             Ok(())
         }
         _ => Err("dev: unknown command".into()),
