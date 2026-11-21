@@ -6,9 +6,9 @@ An app store for iPhone and iPad that needs no computer. It runs in
 [Open Minis](https://apps.apple.com/app/id6759188481), signs apps with your
 own free Apple ID and installs them on the same device.
 
-> **Status:** written and tested on Linux (protocol tests against independent
-> implementations); **not yet run on a device**. Nothing here is confirmed to
-> work on an iPhone until the device tests say so.
+> **Status: 0.10 alpha.** Tested on Linux against independent implementations.
+> On a device so far: LocalDevVPN check and pairing work (iOS 27). Apple ID
+> sign-in, signing and installing are still being tested.
 
 ## What you need
 
@@ -24,7 +24,7 @@ own free Apple ID and installs them on the same device.
 In Open Minis's terminal:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/barismd/BariStore/claude/awesome-maxwell-0fhm39/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/barismd/BariStore/main/install.sh | sh
 ```
 
 After that, `baristore` opens the store over the terminal. `baristore update`
@@ -36,9 +36,11 @@ something goes wrong (it contains no password, token or key).
 The store walks you through it:
 
 1. **LocalDevVPN and Developer Mode**: BariStore checks the loopback VPN answers.
-2. **Pairing**: you get a 6-digit code first, then open Settings › Privacy &
-   Security › Developer Mode, tap **Pair with BariStore** and type it. Minis
-   plays silence meanwhile so iOS keeps it running.
+2. **Pairing**: Minis opens a player that plays silence so iOS keeps it
+   running in the background; swipe it down, it keeps playing in a small
+   bubble. Open Settings › Privacy & Security › Developer Mode, tap **Pair with
+   BariStore** and enter your passcode: the 6-digit code arrives then, as a
+   notification, and you type it in Settings.
 3. **Developer Mode** is read over the new connection; if it is off, BariStore
    can show the switch or turn it on (the iPhone restarts).
 4. **Apple ID** sign-in, two-factor code included. BariStore never signs you out.
@@ -50,7 +52,10 @@ The store walks you through it:
   resolved live from each project's GitHub releases. When an app is offered by
   several sources you choose which one to install from.
 - **My Apps**: what BariStore installed, days left, refresh, delete, put the
-  pairing file into SideStore / LiveContainer / AltStore.
+  pairing file into SideStore / LiveContainer / AltStore. SideStore, AltStore and
+  LiveContainer + SideStore also get the signing certificate
+  (`ALTCertificate.p12`), so they can refresh themselves without asking Apple
+  for a new one.
 - **Options**: Apple ID, pairing-file export, install defaults (Increased
   Memory Limit, remove extensions), sources, appearance, diagnostics, reset.
 
@@ -67,9 +72,12 @@ extensions" saves them).
 - **The password never leaves the device.** Apple's sign-in is SRP: the password
   becomes a one-time proof on the iPhone. It is not stored.
 - **The anisette server never sees your account.** It supplies Apple's
-  device-identity headers from a random identifier, nothing else. BariStore uses
-  Mac-emulating servers (`ani.iloader.app`, `mac-ani.jkcoxson.com`,
-  `ani.jkcoxson.com`, `ani.sidestore.io`), as Apple requires since October 2026.
+  device-identity headers from a random identifier, nothing else. Since
+  October 2026 Apple refuses servers built on its Android library, so BariStore
+  uses the macOS- and Windows-library ones, in siboot's order:
+  `new.ani.sidestore.io`, `mac-ani.jkcoxson.com`, `ani.iloader.app`,
+  `ani3.stikstore.app`, `ani.jkcoxson.com`, `ani2.stikstore.app`,
+  `win.ani.sidestore.io`.
 - The session token, the pairing record and the signing key stay in
   `~/.baristore` inside Minis (mode 600). **No BariStore server exists**: no
   accounts, no analytics.

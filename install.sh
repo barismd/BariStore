@@ -1,7 +1,7 @@
 #!/bin/sh
 # BariStore installer for Open Minis (Alpine aarch64). One line in Minis's
 # terminal:
-#   wget -qO- https://raw.githubusercontent.com/barismd/BariStore/claude/awesome-maxwell-0fhm39/install.sh | sh
+#   wget -qO- https://raw.githubusercontent.com/barismd/BariStore/main/install.sh | sh
 # Downloads the newest build, checks its SHA-256, installs `baristore`, starts it.
 set -eu
 

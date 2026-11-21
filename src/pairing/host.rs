@@ -81,10 +81,15 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> PairableHost<'a, S> {
         PairableHost { stream, identity, name: name.into(), sequence: 0, log }
     }
 
-    /// Runs the whole conversation with `code` as the setup code.
-    pub async fn accept(mut self, code: &str) -> Result<Peer, PairError> {
+    /// Runs the whole conversation. `issue` makes the setup code once the
+    /// iPhone starts pair-setup (M1), which is when Settings asks for it.
+    pub async fn accept<F, Fut>(mut self, issue: F) -> Result<Peer, PairError>
+    where F: FnOnce() -> Fut, Fut: std::future::Future<Output = String>
+    {
         self.handshake().await?;
-        self.pair_setup(code).await
+        self.recv_tlv(1).await?;
+        let code = issue().await;
+        self.pair_setup(&code).await
     }
 
     async fn send(&mut self, value: Json) -> Result<(), PairError> {
@@ -188,8 +193,8 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> PairableHost<'a, S> {
         Err(proto(format!("expected pair-setup M{state}, got {message}")))
     }
 
+    /// M2–M6, after M1 arrived.
     async fn pair_setup(&mut self, code: &str) -> Result<Peer, PairError> {
-        self.recv_tlv(1).await?;
         let group = srp::Group::rfc5054_3072_sha512();
         let salt: [u8; 16] = rand::random();
         let x = srp::x_with_user(&group, &salt, b"Pair-Setup", code.as_bytes());

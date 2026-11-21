@@ -16,7 +16,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 
 use crate::pairing::{record::PairingRecord, tlv8};
 
-const WIRE_VERSION: u64 = 19;
+pub const WIRE_VERSION: u64 = 19;
 
 pub struct Control {
     stream: TcpStream,

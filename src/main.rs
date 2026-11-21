@@ -43,7 +43,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         }
         Some("update") => {
             let status = std::process::Command::new("sh").arg("-c")
-                .arg("wget -qO- https://raw.githubusercontent.com/barismd/BariStore/claude/awesome-maxwell-0fhm39/install.sh | sh")
+                .arg("wget -qO- https://raw.githubusercontent.com/barismd/BariStore/main/install.sh | sh")
                 .status().map_err(|e| e.to_string())?;
             if status.success() { Ok(()) } else { Err("the update did not finish".into()) }
         }
@@ -89,7 +89,7 @@ async fn dev(args: &[String]) -> Result<(), String> {
             let identity = pairing::record::HostIdentity::generate();
             let log = |line: String| println!("host: {line}");
             let peer = pairing::host::PairableHost::new(stream, &identity, "BariStore", &log)
-                .accept(code).await.map_err(|e| e.to_string())?;
+                .accept(|| async { code.clone() }).await.map_err(|e| e.to_string())?;
             println!("paired: udid={} model={} name={}", peer.udid, peer.model, peer.name);
             Ok(())
         }

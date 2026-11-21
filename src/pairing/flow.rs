@@ -1,6 +1,8 @@
 //! One pairing run inside Open Minis: advertise through minis-bonjour, keep
-//! Minis alive with silence, show the code *before* the user leaves for
-//! Settings (and as a notification), accept up to three tries.
+//! Minis alive with silence while the user is in Settings, and make the code
+//! only when the iPhone asks for it (after "Pair with BariStore" and the
+//! passcode): then it goes out as a notification, which the user sees over
+//! Settings. Up to three tries, each with a new code.
 
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -17,9 +19,10 @@ const WAIT_FOR_CODE: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug)]
 pub enum Event {
-    /// Advertising; the user can go to Settings now and type `code`.
-    Ready { code: String, keepalive: bool, notification: bool },
-    Connected { attempt: u32 },
+    /// Advertising; the user can go to Settings now.
+    Waiting { keepalive: bool },
+    /// Settings asks for the code now.
+    Code { code: String, attempt: u32, notification: bool },
     WrongCode { attempts_left: u32 },
     Paired { udid: String, name: String },
 }
@@ -39,7 +42,6 @@ pub fn new_code() -> String {
 pub async fn run(events: mpsc::UnboundedSender<Event>) -> Result<PairingRecord, String> {
     let identity = HostIdentity::load_or_create(&state::path("host.plist"))
         .map_err(|e| format!("cannot save the host identity: {e}"))?;
-    let code = new_code();
     minis::withdraw_stale(host::SERVICE_TYPE).await;
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| e.to_string())?;
@@ -57,12 +59,7 @@ pub async fn run(events: mpsc::UnboundedSender<Event>) -> Result<PairingRecord, 
         .await
         .map_err(|e| format!("Minis could not advertise the pairing host: {e}"))?;
     logf!("pair: advertising {} on guest port {port} ({})", advert.name, advert.state);
-    let spaced = format!("{} {}", &code[..3], &code[3..]);
-    let notification = minis::notify(
-        "Pair with BariStore",
-        &format!("Settings › Privacy & Security › Developer Mode › Pair with {DISPLAY_NAME}. Code {spaced}"),
-    ).await.is_ok();
-    let _ = events.send(Event::Ready { code: code.clone(), keepalive: player.is_some(), notification });
+    let _ = events.send(Event::Waiting { keepalive: player.is_some() });
 
     let started = Instant::now();
     let mut attempt = 0;
@@ -88,9 +85,20 @@ pub async fn run(events: mpsc::UnboundedSender<Event>) -> Result<PairingRecord, 
         let (stream, peer) = accepted.map_err(|e| e.to_string())?;
         attempt += 1;
         logf!("pair: connection {attempt} from {peer}");
-        let _ = events.send(Event::Connected { attempt });
         let log = |line: String| logf!("pair: {line}");
-        let conversation = PairableHost::new(stream, &identity, DISPLAY_NAME, &log).accept(&code);
+        let events_for_code = events.clone();
+        let issue = move || async move {
+            let code = new_code();
+            let spaced = format!("{} {}", &code[..3], &code[3..]);
+            let notification = minis::notify(&format!("Pairing code {spaced}"),
+                                             &format!("Type {spaced} in Settings to pair with {DISPLAY_NAME}.")).await;
+            if let Err(e) = &notification {
+                logf!("pair: notification failed: {e}");
+            }
+            let _ = events_for_code.send(Event::Code { code: code.clone(), attempt, notification: notification.is_ok() });
+            code
+        };
+        let conversation = PairableHost::new(stream, &identity, DISPLAY_NAME, &log).accept(issue);
         match tokio::time::timeout(WAIT_FOR_CODE, conversation).await {
             Ok(Ok(peer)) => {
                 let record = PairingRecord { host: identity.clone(), peer };

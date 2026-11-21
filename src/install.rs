@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::apple::gsa::{Account, GrandSlam};
-use crate::apple::portal::{Portal, Team};
+use crate::apple::portal::{DevCert, Portal, Team};
 use crate::device::{services, session::Session};
 use crate::sign::bundle::{self, Ipa, Kind, Plan, Signing};
 use crate::sign::codesign::Identity;
@@ -101,7 +101,8 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: &[u8], opts: &Option
     status("Registering this iPhone".into());
     portal.ensure_device(team, ctx.udid, ctx.device_name).await.map_err(|e| e.to_string())?;
     status("Getting the signing certificate".into());
-    let (leaf, key) = portal.certificate(team).await.map_err(|e| e.to_string())?;
+    let cert = portal.certificate(team).await.map_err(|e| e.to_string())?;
+    let leaf = cert.der.clone();
     let leaf_info = der::cert_info(&leaf)?;
     let common_name = der::name_value(leaf_info.subject, "2.5.4.3").unwrap_or_default();
 
@@ -175,16 +176,44 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: &[u8], opts: &Option
     if chain.is_empty() {
         return Err("the certificate Apple issued chains to an Apple CA BariStore does not know".into());
     }
+    let add_files = alt_certificate(&bundles, &main, &cert, ctx.udid, &mut info_edits)?;
     let plan = Plan {
-        identity: Identity { leaf, chain, key, team: team.into(), common_name },
+        identity: Identity { leaf, chain, key: cert.key, team: team.into(), common_name },
         bundles: plan_bundles,
         info_edits,
-        add_files: vec![],
+        add_files,
     };
     status("Signing".into());
     bundle::sign(&mut ipa, &plan, &mut |n, t| status(format!("Signing {n}/{t}")))?;
     let out = ipa.write()?;
     Ok((out, main_new, if expires == u64::MAX { 0 } else { expires }, main.version))
+}
+
+/// AltStore-family apps refresh themselves with the certificate they were
+/// signed with: SideStore and AltStore read ALTCertificate.p12 from their
+/// bundle, the certificate named by ALTCertificateID, opened with the
+/// certificate's machine identifier (SideStore's CertificateProvisioningFlow;
+/// isideload does the same). Without it they ask Apple for a new certificate
+/// or to revoke one. In LiveContainer+SideStore the target is the embedded
+/// SideStore framework. AltStore also learns this iPhone's UDID (ALTDeviceID).
+fn alt_certificate(bundles: &[bundle::Bundle], main: &bundle::Bundle, cert: &DevCert, udid: &str,
+                   info_edits: &mut HashMap<String, Dictionary>) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let target = bundles.iter().find(|b| b.kind == Kind::Framework && b.id == "com.SideStore.SideStore")
+        .or_else(|| [main].into_iter().find(|m| m.id.starts_with("com.SideStore.SideStore")
+                                             || m.id.starts_with("com.rileytestut.AltStore")));
+    let Some(target) = target else { return Ok(vec![]) };
+    if cert.machine_id.is_empty() || cert.serial.is_empty() {
+        logf!("install: the portal did not list the certificate's serial or machine id; no ALTCertificate.p12");
+        return Ok(vec![]);
+    }
+    let p12 = crate::sign::p12::pkcs12(&cert.der, &cert.key, &cert.machine_id, "BariStore")?;
+    let edits = info_edits.entry(target.dir.clone()).or_default();
+    edits.insert("ALTCertificateID".into(), Value::String(cert.serial.clone()));
+    if main.id.starts_with("com.rileytestut.AltStore") {
+        info_edits.entry(main.dir.clone()).or_default().insert("ALTDeviceID".into(), Value::String(udid.into()));
+    }
+    logf!("install: ALTCertificate.p12 for {} (certificate {})", target.name, cert.serial);
+    Ok(vec![(format!("{}/ALTCertificate.p12", target.dir), p12)])
 }
 
 /// Writes the pairing record into apps that refresh themselves over the

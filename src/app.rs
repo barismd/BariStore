@@ -54,6 +54,8 @@ struct Inner {
     answers: HashMap<u64, oneshot::Sender<Option<String>>>,
     next_id: u64,
     pairing_code: String,
+    /// A pairing run is advertising (the page shows where to tap).
+    pairing_waiting: bool,
     catalog: Vec<store::App>,
     sources: Vec<store::Source>,
     refreshing: bool,
@@ -112,6 +114,7 @@ impl App {
             "task": i.task,
             "question": i.question,
             "pairing_code": i.pairing_code,
+            "pairing_waiting": i.pairing_waiting,
             "settings": settings(),
             "installed": install::installed(),
             "device_apps": i.device_apps,
@@ -242,14 +245,19 @@ impl App {
         let watcher = tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    flow::Event::Ready { code, keepalive, notification } => {
-                        app.inner.lock().unwrap().pairing_code = code;
-                        let mut text = String::from("Waiting for Settings.");
-                        if notification { text.push_str(" The code also came as a notification."); }
-                        if !keepalive { text.push_str(" Minis's player did not start: stay quick in Settings."); }
-                        app.step(text);
+                    flow::Event::Waiting { keepalive } => {
+                        app.inner.lock().unwrap().pairing_waiting = true;
+                        app.step(if keepalive {
+                            "Waiting for Settings. Swipe Minis's player down: it keeps playing, and keeps BariStore running."
+                        } else {
+                            "Waiting for Settings. Minis's player did not start: be quick in Settings."
+                        });
                     }
-                    flow::Event::Connected { attempt } => app.step(format!("Settings connected (try {attempt}): type the code")),
+                    flow::Event::Code { code, attempt, notification } => {
+                        app.inner.lock().unwrap().pairing_code = code;
+                        app.step(format!("Settings asks for the code (try {attempt}).{}",
+                            if notification { " It also came as a notification." } else { "" }));
+                    }
                     flow::Event::WrongCode { attempts_left } => app.step(format!("Wrong code. {attempts_left} tries left")),
                     flow::Event::Paired { udid, name } => app.step(format!("Paired with {name} ({})", udid.get(..8).unwrap_or(""))),
                 }
@@ -257,7 +265,11 @@ impl App {
         });
         let result = flow::run(tx).await;
         watcher.abort();
-        self.inner.lock().unwrap().pairing_code.clear();
+        {
+            let mut i = self.inner.lock().unwrap();
+            i.pairing_code.clear();
+            i.pairing_waiting = false;
+        }
         let record = result?;
         *self.session.lock().await = None;
         {

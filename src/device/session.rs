@@ -1,6 +1,6 @@
 //! One live connection to this iPhone: control channel + TLS-PSK CDTunnel +
 //! our TCP stack + RSD service map. LocalDevVPN loops 10.7.0.1 back to the
-//! device's own RemotePairing service (port 49152 unless it says otherwise).
+//! device's own RemotePairing service (port 49152, or another dynamic port).
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
@@ -55,24 +55,73 @@ pub fn host_uuid() -> [u8; 16] {
     *u.as_bytes()
 }
 
-/// Is LocalDevVPN answering? (A plain TCP connect, no data.)
+/// Is LocalDevVPN answering? Through it 10.7.0.1 either accepts or refuses
+/// at once; without it the connection goes nowhere.
 pub async fn vpn_up() -> bool {
-    let (host, port) = endpoint();
-    matches!(tokio::time::timeout(Duration::from_secs(3), TcpStream::connect((host.as_str(), port))).await,
-             Ok(Ok(_)))
+    let (host, port) = override_endpoint().unwrap_or((LOOPBACK.to_string(), PAIRING_PORT));
+    match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect((host.as_str(), port))).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+        Err(_) => false,
+    }
 }
 
-/// Where the RemotePairing service answers: LocalDevVPN's loopback, unless
-/// BARISTORE_DEVICE=host:port overrides it (tests against a mock device).
-pub fn endpoint() -> (String, u16) {
-    if let Ok(v) = std::env::var("BARISTORE_DEVICE") {
-        if let Some((h, p)) = v.rsplit_once(':') {
-            if let Ok(p) = p.parse() {
-                return (h.to_string(), p);
-            }
+/// BARISTORE_DEVICE=host:port points at a mock device in tests.
+fn override_endpoint() -> Option<(String, u16)> {
+    let v = std::env::var("BARISTORE_DEVICE").ok()?;
+    let (h, p) = v.rsplit_once(':')?;
+    Some((h.to_string(), p.parse().ok()?))
+}
+
+/// Does `port` answer an RPPairing handshake (the RemotePairing service)?
+async fn answers_pairing(host: &str, port: u16) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(Ok(mut s)) = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect((host, port))).await else {
+        return false;
+    };
+    let body = serde_json::to_vec(&json!({"message": {"plain": {"_0": {"request": {"_0": {"handshake": {"_0": {
+        "hostOptions": {"attemptPairVerify": true},
+        "wireProtocolVersion": super::rppairing::WIRE_VERSION}}}}}}},
+        "originatedBy": "host", "sequenceNumber": 0})).unwrap();
+    let mut frame = b"RPPairing".to_vec();
+    frame.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&body);
+    let mut magic = [0u8; 9];
+    s.write_all(&frame).await.is_ok()
+        && matches!(tokio::time::timeout(Duration::from_secs(3), s.read_exact(&mut magic)).await, Ok(Ok(_)))
+        && &magic == b"RPPairing"
+}
+
+/// Where the RemotePairing service answers. Usually 49152, but iOS takes
+/// the first free dynamic port at boot, so when that one is not it, the
+/// other dynamic ports are knocked 32 at a time (as siboot 0.19.1 does) and
+/// the port found is remembered.
+pub async fn endpoint() -> Result<(String, u16), OpenError> {
+    if let Some(e) = override_endpoint() {
+        return Ok(e);
+    }
+    let saved = std::fs::read_to_string(state::path("device-port")).ok()
+        .and_then(|s| s.trim().parse::<u16>().ok());
+    for port in saved.into_iter().chain([PAIRING_PORT]) {
+        if answers_pairing(LOOPBACK, port).await {
+            return Ok((LOOPBACK.to_string(), port));
         }
     }
-    (LOOPBACK.to_string(), PAIRING_PORT)
+    if !vpn_up().await {
+        return Err(OpenError::NoVpn(format!("{LOOPBACK} does not answer")));
+    }
+    logf!("device: {PAIRING_PORT} is not the pairing service; knocking on the other dynamic ports");
+    let ports: Vec<u16> = (PAIRING_PORT + 1..=u16::MAX).filter(|p| *p != 62078).collect();
+    for chunk in ports.chunks(32) {
+        let probes = chunk.iter().map(|&p| async move { (p, answers_pairing(LOOPBACK, p).await) });
+        if let Some((port, _)) = futures_util::future::join_all(probes).await.into_iter().find(|(_, ok)| *ok) {
+            logf!("device: the pairing service answers on {port}");
+            let _ = std::fs::write(state::path("device-port"), port.to_string());
+            return Ok((LOOPBACK.to_string(), port));
+        }
+    }
+    Err(OpenError::Failed("LocalDevVPN is connected, but no port answers as the iPhone's pairing service. \
+        Restart the iPhone with Developer Mode on, then try again".into()))
 }
 
 pub struct Tunnel {
@@ -84,7 +133,7 @@ pub struct Tunnel {
 impl Tunnel {
     /// Pair-verify, createListener, TLS-PSK, CDTunnel, and our TCP stack on it.
     pub async fn open(record: &PairingRecord) -> Result<Tunnel, OpenError> {
-        let (host, pairing_port) = endpoint();
+        let (host, pairing_port) = endpoint().await?;
         let host = host.as_str();
         let mut control = match Control::open(host, pairing_port, record).await {
             Ok(c) => c,

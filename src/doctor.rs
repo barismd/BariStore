@@ -35,8 +35,11 @@ pub async fn report() -> String {
         let names: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         let _ = writeln!(out, "/var/minis  {}", names.join(" "));
     }
-    let (host, port) = session::endpoint();
-    let _ = writeln!(out, "LocalDevVPN {host}:{port} {}", if session::vpn_up().await { "answers" } else { "NO ANSWER" });
+    let _ = writeln!(out, "LocalDevVPN {}", if session::vpn_up().await { "answers" } else { "NO ANSWER" });
+    let _ = writeln!(out, "pairing svc {}", match session::endpoint().await {
+        Ok((host, port)) => format!("{host}:{port}"),
+        Err(e) => e.to_string(),
+    });
     match flow::load_record() {
         Some(r) => {
             let _ = writeln!(out, "pairing     yes, {} ({}), udid {}", r.peer.name, r.peer.model, short(&r.peer.udid, 8));

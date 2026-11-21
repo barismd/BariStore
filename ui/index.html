@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>BariStore</title>
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <style>
@@ -24,7 +24,8 @@ html, body { margin: 0; background: var(--bg); color: var(--text);
   font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
 body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
 button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; }
-input { font: inherit; color: var(--text); }
+input { font: inherit; font-size: max(16px, 1em); color: var(--text); }
+html { -webkit-text-size-adjust: 100%; touch-action: manipulation; }
 .wrap { max-width: 720px; margin: 0 auto; padding: 0 16px; }
 header.top { padding: calc(14px + env(safe-area-inset-top)) 0 6px; display: flex; align-items: center; gap: 12px; }
 header.top img { width: 40px; height: 40px; }
@@ -158,9 +159,9 @@ function setupView() {
      Settings › Privacy & Security › Developer Mode. Wi-Fi on.
      <button class="btn" onclick="check()">Check again</button>
      ${st.vpn === false ? '<div class="notice bad">LocalDevVPN does not answer yet.</div>' : ""}`;
-  const s2 = `BariStore pairs this iPhone with itself. You will get a 6-digit code first, then go to
-     Settings › Privacy & Security › Developer Mode, scroll to the bottom and tap <b>Pair with BariStore</b>.
-     Minis plays silence meanwhile so it keeps running: leave its player open.
+  const s2 = `BariStore pairs this iPhone with itself. After you tap Start, Minis opens a player that plays silence so
+     BariStore keeps running: swipe it down, it keeps playing. Then go to Settings › Privacy & Security › Developer Mode,
+     scroll to the bottom and tap <b>Pair with BariStore</b>. After your passcode the 6-digit code comes as a notification.
      <button class="btn" onclick="act('pair')">Start pairing</button>`;
   const s3 = `Developer Mode is off. Show the switch in Settings (no restart), or turn it on now (the iPhone restarts;
      iOS refuses this while a passcode is set, then flip the switch yourself).
@@ -355,9 +356,11 @@ function renderSheet() {
     const pct = task.progress;
     const code = S.pairing_code;
     html = `<div class="grab"></div><h2 style="margin-top:0">${esc(task.title)}</h2>
-      ${code && !task.done ? `<div class="muted">Your pairing code</div><div class="code">${esc(code.slice(0, 3))} ${esc(code.slice(3))}</div>
-        <ol class="small muted"><li>Open Settings › Privacy & Security › Developer Mode.</li><li>Scroll to the bottom, tap <b>Pair with BariStore</b>.</li>
-        <li>Enter your passcode if asked, then this code.</li><li>Come back to Minis when Settings says it paired.</li></ol>` : ""}
+      ${code && !task.done ? `<div class="muted">Your pairing code</div><div class="code">${esc(code.slice(0, 3))} ${esc(code.slice(3))}</div>` : ""}
+      ${S.pairing_waiting && !task.done ? `<ol class="small muted"><li>Swipe Minis's player down. It keeps playing in a small bubble; leave it.</li>
+        <li>Open Settings › Privacy & Security › Developer Mode, scroll to the bottom, tap <b>Pair with BariStore</b>.</li>
+        <li>Enter your passcode. The pairing code comes then, as a notification at the top: type it in Settings.</li>
+        <li>Come back to Minis when Settings says it paired.</li></ol>` : ""}
       ${task.error ? `<div class="notice bad">${esc(task.error)}</div>` : `<p>${esc(task.step || "Working…")}</p>`}
       ${task.done ? "" : `<div class="bar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 35}%"></i></div>`}
       ${task.done ? `${task.error && task.retry ? `<button class="btn" onclick="retry()">Try again</button>` : ""}

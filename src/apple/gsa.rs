@@ -29,9 +29,13 @@ pub fn http_client() -> reqwest::Client {
 
 #[derive(Debug)]
 pub enum LoginError {
-    WrongPassword,
-    /// Apple refused this anisette identity (-80045/-80046/503): try another server.
+    /// -20101 / -20970 / -22406, with Apple's own words. -22406 can also mean
+    /// Apple is throttling, or did not believe the anisette identity.
+    WrongPassword(String),
+    /// Apple refused this anisette identity (-80045/-80046/-23782): try another server.
     IdentityRefused(String),
+    /// Retrying cannot help now (429, 503 from gsa, locked account).
+    Stop(String),
     Cancelled,
     Other(String),
 }
@@ -39,7 +43,10 @@ pub enum LoginError {
 impl std::fmt::Display for LoginError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoginError::WrongPassword => write!(f, "Apple says the email or password is wrong"),
+            LoginError::WrongPassword(why) => write!(f,
+                "Apple rejected the email or password ({why}). If you are sure they are right, Apple may be \
+                 limiting sign-ins: wait a while before trying again"),
+            LoginError::Stop(why) => write!(f, "{why}"),
             LoginError::IdentityRefused(why) => write!(f, "Apple refused the sign-in identity ({why})"),
             LoginError::Cancelled => write!(f, "sign-in cancelled"),
             LoginError::Other(why) => write!(f, "{why}"),
@@ -75,10 +82,14 @@ fn check(response: &Dictionary) -> Result<(), LoginError> {
         return Ok(());
     }
     let message = status.and_then(|s| s.get("em")).and_then(Value::as_string).unwrap_or("").to_string();
+    let what = format!("{code} {message}");
+    logf!("gsa: Apple answered {what}");
     Err(match code {
-        -22406 => LoginError::WrongPassword,
-        -80045 | -80046 => LoginError::IdentityRefused(format!("{code} {message}")),
-        _ => LoginError::Other(format!("Apple error {code}: {message}")),
+        -20101 | -20970 | -22406 => LoginError::WrongPassword(what),
+        -80045 | -80046 | -23782 => LoginError::IdentityRefused(what),
+        -20209 => LoginError::Stop(format!("Apple locked this Apple Account for security reasons ({what}); \
+                                             unlock it at iforgot.apple.com")),
+        _ => LoginError::Other(format!("Apple error {what}")),
     })
 }
 
@@ -94,14 +105,14 @@ impl GrandSlam {
         if let Ok(v) = self.info.user_agent.parse() {
             h.insert("User-Agent", v);
         }
-        h.insert("X-Xcode-Version", "27.0 (27A5218g)".parse().unwrap());
+        h.insert("X-Xcode-Version", "14.2 (14C18)".parse().unwrap());
         h.insert("X-Apple-App-Info", "com.apple.gs.xcode.auth".parse().unwrap());
         h
     }
 
-    pub async fn connect(server: &str) -> Result<GrandSlam, String> {
+    pub async fn connect(server: &str, as_advertised: bool) -> Result<GrandSlam, String> {
         let http = http_client();
-        let anisette = Anisette::connect(&http, server).await?;
+        let anisette = Anisette::connect(&http, server, as_advertised).await?;
         let info = anisette.info.clone();
         let mut gs = GrandSlam { http, anisette: tokio::sync::Mutex::new(anisette), info, bag: Dictionary::new() };
         let text = gs.http.get(URL_BAG).headers(gs.base_headers(false)).send().await
@@ -124,7 +135,20 @@ impl GrandSlam {
         if let Some(extra) = extra {
             req = req.headers(extra);
         }
-        let resp = req.body(crate::pairing::record::plist_xml(body)).send().await.map_err(|e| e.to_string())?;
+        let body = crate::pairing::record::plist_xml(body);
+        // A 429 is often momentary (iloader 2.3.4): ask again after 2 s and 5 s.
+        let mut delays = [2u64, 5].into_iter();
+        let resp = loop {
+            let resp = req.try_clone().ok_or("request cannot be repeated")?
+                .body(body.clone()).send().await.map_err(|e| e.to_string())?;
+            match delays.next() {
+                Some(d) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    logf!("gsa: 429 from Apple; asking again in {d} s");
+                    tokio::time::sleep(std::time::Duration::from_secs(d)).await;
+                }
+                _ => break resp,
+            }
+        };
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
@@ -138,7 +162,12 @@ impl GrandSlam {
 
     pub async fn headers(&self) -> Result<Headers, String> {
         let mut a = self.anisette.lock().await;
-        a.headers(&self.http, self).await
+        a.headers(&self.http, self, None).await
+    }
+
+    async fn resync(&self, sim: &str) -> Result<Headers, String> {
+        let mut a = self.anisette.lock().await;
+        a.headers(&self.http, self, Some(sim)).await
     }
 }
 
@@ -207,13 +236,24 @@ async fn srp_login(gs: &GrandSlam, email: &str, password: &str) -> Result<Stage,
     let group = srp::Group::rfc5054_2048_sha256();
     let client = srp::Client::new(&group);
 
-    let mut init = Dictionary::new();
-    init.insert("A2k".into(), Value::Data(client.public()));
-    init.insert("cpd".into(), Value::Dictionary(headers.cpd()));
-    init.insert("o".into(), Value::String("init".into()));
-    init.insert("ps".into(), Value::Array(vec![Value::String("s2k".into()), Value::String("s2k_fo".into())]));
-    init.insert("u".into(), Value::String(email.into()));
-    let r1 = gs.plist_post(&url, &request_body(init), None).await.map_err(identity_or_other)?;
+    let init = |headers: &Headers| {
+        let mut init = Dictionary::new();
+        init.insert("A2k".into(), Value::Data(client.public()));
+        init.insert("cpd".into(), Value::Dictionary(headers.cpd()));
+        init.insert("o".into(), Value::String("init".into()));
+        init.insert("ps".into(), Value::Array(vec![Value::String("s2k".into()), Value::String("s2k_fo".into())]));
+        init.insert("u".into(), Value::String(email.into()));
+        request_body(init)
+    };
+    let mut r1 = gs.plist_post(&url, &init(&headers), None).await.map_err(gsa_failure)?;
+    // Windows-library servers get hsc 434 (-22421) on a machine's first
+    // sign-in, with resync data for ADI; once applied, the same request works.
+    let mut headers = headers;
+    if let Some(sim) = resync_sim(&r1) {
+        logf!("gsa: Apple asked for an anisette resync (hsc 434)");
+        headers = gs.resync(&sim).await.map_err(other)?;
+        r1 = gs.plist_post(&url, &init(&headers), None).await.map_err(gsa_failure)?;
+    }
     check(&r1)?;
     let data = |d: &Dictionary, k: &str| d.get(k).and_then(Value::as_data).map(<[u8]>::to_vec)
         .ok_or_else(|| other(format!("Apple's answer lacks {k}")));
@@ -238,7 +278,7 @@ async fn srp_login(gs: &GrandSlam, email: &str, password: &str) -> Result<Stage,
     complete.insert("cpd".into(), Value::Dictionary(headers.cpd()));
     complete.insert("o".into(), Value::String("complete".into()));
     complete.insert("u".into(), Value::String(email.into()));
-    let r2 = gs.plist_post(&url, &request_body(complete), None).await.map_err(identity_or_other)?;
+    let r2 = gs.plist_post(&url, &request_body(complete), None).await.map_err(gsa_failure)?;
     check(&r2)?;
     if !session.verify_server(&data(&r2, "M2")?) {
         return Err(other("Apple's server proof did not verify"));
@@ -262,11 +302,31 @@ async fn srp_login(gs: &GrandSlam, email: &str, password: &str) -> Result<Stage,
     Ok(Stage::LoggedIn(spd))
 }
 
-fn identity_or_other(e: String) -> LoginError {
+/// HTTP failures from gsa.apple.com: a 503 is Apple refusing the request
+/// before it reads the anisette data, and a 429 left after the retries is
+/// throttling, so no other server would do better.
+fn gsa_failure(e: String) -> LoginError {
     if e.contains("HTTP 503") {
-        LoginError::IdentityRefused(e)
+        LoginError::Stop(format!("Apple's sign-in server refused the request; try again later ({e})"))
+    } else if e.contains("HTTP 429") {
+        LoginError::Stop("Apple is limiting sign-ins for this account or network. Wait a while: every attempt \
+                          can extend the wait".into())
     } else {
         LoginError::Other(e)
+    }
+}
+
+/// The resync data (base64) of a response whose Status asks for an anisette
+/// resync (hsc 434).
+fn resync_sim(response: &Dictionary) -> Option<String> {
+    let status = response.get("Status")?.as_dictionary()?;
+    if status.get("hsc").and_then(Value::as_signed_integer) != Some(434) {
+        return None;
+    }
+    match status.get("X-Apple-I-MD-DATA")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Data(d) => Some(B64.encode(d)),
+        _ => None,
     }
 }
 
@@ -350,7 +410,7 @@ pub async fn app_token(gs: &GrandSlam, account: &mut Account) -> Result<(), Logi
     request.insert("u".into(), Value::String(account.adsid.clone()));
     request.insert("t".into(), Value::String(account.idms_token.clone()));
     let url = gs.url("gsService").map_err(other)?;
-    let reply = gs.plist_post(&url, &request_body(request), None).await.map_err(identity_or_other)?;
+    let reply = gs.plist_post(&url, &request_body(request), None).await.map_err(gsa_failure)?;
     check(&reply)?;
     let sealed = reply.get("et").and_then(Value::as_data).ok_or_else(|| other("no encrypted token"))?;
     if sealed.len() < 35 || &sealed[..3] != b"XYZ" {
@@ -397,29 +457,51 @@ async fn login_on(gs: &GrandSlam, email: &str, password: &str, ask: &CodeAsker) 
 }
 
 /// Signs in, failing over to the next anisette server when Apple refuses the
-/// identity. Returns the GrandSlam connection that worked.
+/// identity. On a server whose own client info we replaced (an old Mac), a
+/// credential refusal is tried once more as the server advertises it
+/// (iloader 2.4.2 signs in that way), then sign-in stops: more attempts with
+/// the same password risk Apple locking the account. Returns the GrandSlam
+/// connection that worked.
 pub async fn login(email: &str, password: &str, ask: &CodeAsker) -> Result<(GrandSlam, Account), LoginError> {
+    let email = email.trim().to_lowercase();
     let mut last = LoginError::Other("no anisette server answered".into());
+    let mut tried_advertised = false;
     for server in preferred_servers() {
-        let gs = match GrandSlam::connect(&server).await {
-            Ok(gs) => gs,
-            Err(e) => {
-                logf!("gsa: {server} unusable: {e}");
-                last = LoginError::Other(e);
-                continue;
+        for as_advertised in [false, true] {
+            if as_advertised && tried_advertised {
+                break;
             }
-        };
-        match login_on(&gs, email, password, ask).await {
-            Ok(account) => {
-                let _ = std::fs::write(state::path("anisette-server"), &server);
-                return Ok((gs, account));
+            let gs = match GrandSlam::connect(&server, as_advertised).await {
+                Ok(gs) => gs,
+                Err(e) => {
+                    logf!("gsa: {server} unusable: {e}");
+                    last = LoginError::Other(e);
+                    break;
+                }
+            };
+            let replaced = { let a = gs.anisette.lock().await; a.info != a.advertised };
+            if as_advertised && !replaced {
+                break;
             }
-            Err(LoginError::IdentityRefused(why)) => {
-                logf!("gsa: {server}: identity refused ({why}); next server");
-                gs.anisette.lock().await.forget();
-                last = LoginError::IdentityRefused(why);
+            match login_on(&gs, &email, password, ask).await {
+                Ok(account) => {
+                    let _ = std::fs::write(state::path("anisette-server"),
+                                           format!("{server}\n{}", if as_advertised { "advertised" } else { "" }));
+                    return Ok((gs, account));
+                }
+                Err(LoginError::IdentityRefused(why)) => {
+                    logf!("gsa: {server}: identity refused ({why}); next server");
+                    gs.anisette.lock().await.forget();
+                    last = LoginError::IdentityRefused(why);
+                    break;
+                }
+                Err(LoginError::WrongPassword(why)) if replaced && !as_advertised => {
+                    logf!("gsa: {server}: {why} as a current Mac; once more as the server advertises");
+                    tried_advertised = true;
+                    last = LoginError::WrongPassword(why);
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         }
     }
     Err(last)
@@ -428,8 +510,10 @@ pub async fn login(email: &str, password: &str, ask: &CodeAsker) -> Result<(Gran
 /// Reuses the saved session: refreshes the Xcode token without a password.
 pub async fn resume() -> Result<(GrandSlam, Account), String> {
     let mut account = Account::load().ok_or("not signed in")?;
-    let server = std::fs::read_to_string(state::path("anisette-server")).unwrap_or_else(|_| SERVERS[0].to_string());
-    let gs = GrandSlam::connect(server.trim()).await?;
+    let saved = std::fs::read_to_string(state::path("anisette-server")).unwrap_or_default();
+    let mut lines = saved.lines();
+    let server = lines.next().filter(|s| !s.trim().is_empty()).unwrap_or(SERVERS[0]).trim().to_string();
+    let gs = GrandSlam::connect(&server, lines.next() == Some("advertised")).await?;
     if !account.token_fresh() {
         app_token(&gs, &mut account).await.map_err(|e| e.to_string())?;
         let _ = account.save();
@@ -439,8 +523,9 @@ pub async fn resume() -> Result<(GrandSlam, Account), String> {
 
 fn preferred_servers() -> Vec<String> {
     let mut list: Vec<String> = SERVERS.iter().map(|s| s.to_string()).collect();
-    if let Ok(saved) = std::fs::read_to_string(state::path("anisette-server")) {
-        let saved = saved.trim().to_string();
+    if let Some(saved) = std::fs::read_to_string(state::path("anisette-server")).ok()
+        .and_then(|s| s.lines().next().map(|l| l.trim().to_string())).filter(|s| !s.is_empty())
+    {
         list.retain(|s| *s != saved);
         list.insert(0, saved);
     }

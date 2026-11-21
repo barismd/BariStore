@@ -14,6 +14,23 @@ use crate::{der, logf, state};
 pub const MACHINE_NAME: &str = "BariStore";
 
 #[derive(Debug)]
+/// A development certificate as the portal lists it.
+pub struct DevCert {
+    pub der: Vec<u8>,
+    pub key: RsaPrivateKey,
+    /// What AltStore-family apps match `ALTCertificateID` against.
+    pub serial: String,
+    /// The machineId sent with the CSR: the password of ALTCertificate.p12.
+    pub machine_id: String,
+}
+
+impl DevCert {
+    fn listed(c: &Dictionary, content: &[u8], key: RsaPrivateKey) -> DevCert {
+        let serial = Some(s(c, "serialNumber")).filter(|v| !v.is_empty()).unwrap_or_else(|| s(c, "serialNum"));
+        DevCert { der: content.to_vec(), key, serial, machine_id: s(c, "machineId") }
+    }
+}
+
 pub struct PortalError {
     pub code: i64,
     pub message: String,
@@ -125,11 +142,11 @@ impl Portal<'_> {
         self.call("revokeDevelopmentCert", Some(team), body).await.map(|_| ())
     }
 
-    /// Our development certificate (DER) and its key, reused while Apple still
+    /// Our development certificate and its key, reused while Apple still
     /// lists it; a new one otherwise. When the team is full (7460), only
     /// certificates BariStore itself made are revoked: other tools' certificates
     /// keep their apps running, so the error names them instead.
-    pub async fn certificate(&self, team: &str) -> Result<(Vec<u8>, RsaPrivateKey), PortalError> {
+    pub async fn certificate(&self, team: &str) -> Result<DevCert, PortalError> {
         let key = load_or_create_key().map_err(err)?;
         let modulus = key.to_public_key().to_pkcs1_der().map_err(|e| err(e.to_string()))?.as_bytes().to_vec();
         let certs = self.certificates(team).await?;
@@ -137,7 +154,7 @@ impl Portal<'_> {
             if let Some(content) = c.get("certContent").and_then(Value::as_data) {
                 if let Ok(info) = der::cert_info(content) {
                     if spki_matches(info.spki, &modulus) {
-                        return Ok((content.to_vec(), key));
+                        return Ok(DevCert::listed(c, content, key));
                     }
                 }
             }
@@ -146,7 +163,8 @@ impl Portal<'_> {
         let mut body = Dictionary::new();
         body.insert("csrContent".into(), Value::String(csr));
         body.insert("machineName".into(), Value::String(MACHINE_NAME.into()));
-        body.insert("machineId".into(), Value::String(uuid::Uuid::new_v4().to_string().to_uppercase()));
+        let machine_id = uuid::Uuid::new_v4().to_string().to_uppercase();
+        body.insert("machineId".into(), Value::String(machine_id.clone()));
         let submitted = match self.call("submitDevelopmentCSR", Some(team), body.clone()).await {
             Err(e) if e.code == 7460 => {
                 let ours: Vec<String> = certs.iter()
@@ -171,7 +189,11 @@ impl Portal<'_> {
             let matches_id = !request_id.is_empty() && s(&c, "certificateId") == request_id;
             let matches_key = der::cert_info(content).map(|i| spki_matches(i.spki, &modulus)).unwrap_or(false);
             if matches_id || matches_key {
-                return Ok((content.to_vec(), key));
+                let mut cert = DevCert::listed(&c, content, key);
+                if cert.machine_id.is_empty() {
+                    cert.machine_id = machine_id;
+                }
+                return Ok(cert);
             }
         }
         Err(err("Apple issued a certificate but does not list it yet; try again in a minute"))
