@@ -12,3 +12,5 @@ account*.plist
 .env.*
 *.ipa
 .DS_Store
+__pycache__/
+/state/
