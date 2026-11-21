@@ -111,6 +111,12 @@ impl PairingRecord {
         plist_xml(&d)
     }
 
+    /// Only the RemotePairing keys: what apps import (SideStore rejects a file
+    /// that looks like it holds a second, lockdown record).
+    pub fn to_remote_only_xml(&self) -> Vec<u8> {
+        plist_xml(&self.host.base_dict())
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let d = plist::from_bytes::<Value>(bytes).ok()?.into_dictionary()?;
         let host = HostIdentity::from_dict(&d)?;

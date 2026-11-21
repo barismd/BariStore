@@ -1,9 +1,11 @@
 mod apple;
 mod der;
 mod device;
+mod install;
 mod log;
 mod minis;
 mod pairing;
+mod sign;
 mod siphash;
 mod srp;
 mod state;
@@ -71,6 +73,39 @@ async fn dev(args: &[String]) -> Result<(), String> {
                 Ok(Ok(_)) => println!("tcp over the echo link: connected"),
                 Err(_) => println!("tcp over the echo link: no answer (expected from an echo)"),
             }
+            Ok(())
+        }
+        Some("sign") => {
+            // dev sign <in.ipa> <out.ipa> <cert.der> <key.pk8.der> <team>: every
+            // app/appex gets a dummy profile and minimal entitlements.
+            use plist::Value;
+            let a = |i: usize| args.get(i).cloned().ok_or("dev sign <in> <out> <cert.der> <key.der> <team>");
+            let bytes = std::fs::read(a(1)?).map_err(|e| e.to_string())?;
+            let leaf = std::fs::read(a(3)?).map_err(|e| e.to_string())?;
+            let key = {
+                use rsa::pkcs8::DecodePrivateKey;
+                rsa::RsaPrivateKey::from_pkcs8_der(&std::fs::read(a(4)?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?
+            };
+            let team = a(5)?;
+            let mut ipa = sign::bundle::Ipa::read(&bytes)?;
+            let mut plan = sign::bundle::Plan {
+                identity: sign::codesign::Identity { leaf, chain: vec![], key, team: team.clone(), common_name: "Test".into() },
+                bundles: Default::default(), info_edits: Default::default(), add_files: vec![],
+            };
+            for b in ipa.bundles()? {
+                if b.kind == sign::bundle::Kind::Framework { continue; }
+                let new_id = format!("{}.{team}", b.id);
+                let mut ent = plist::Dictionary::new();
+                ent.insert("application-identifier".into(), Value::String(format!("{team}.{new_id}")));
+                ent.insert("com.apple.developer.team-identifier".into(), Value::String(team.clone()));
+                ent.insert("get-task-allow".into(), Value::Boolean(true));
+                println!("bundle {} {} -> {}", b.dir, b.id, new_id);
+                plan.bundles.insert(b.dir.clone(), sign::bundle::Signing { new_id, profile: b"profile".to_vec(), entitlements: ent });
+            }
+            let started = std::time::Instant::now();
+            sign::bundle::sign(&mut ipa, &plan, &mut |n, t| println!("signed {n}/{t}"))?;
+            std::fs::write(a(2)?, ipa.write()?).map_err(|e| e.to_string())?;
+            println!("ok in {:?}", started.elapsed());
             Ok(())
         }
         _ => Err("dev: unknown command".into()),
