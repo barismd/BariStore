@@ -266,7 +266,15 @@ impl App {
             i.setup.udid = record.peer.udid.clone();
             i.setup.device_name = record.peer.name.clone();
         }
-        Ok(format!("Paired with {}", record.peer.name))
+        // Prove the new record works and learn Developer Mode's state now.
+        self.step("Connecting through LocalDevVPN");
+        match self.device().await {
+            Ok(_) => Ok(format!("Paired with {}. The connection works.", record.peer.name)),
+            Err(e) => {
+                logf!("pair: paired, but the first connection failed: {e}");
+                Ok(format!("Paired with {}, but connecting failed: {e}", record.peer.name))
+            }
+        }
     }
 
     pub async fn developer_mode(&self, action: Option<u64>) -> Result<String, String> {
