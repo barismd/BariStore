@@ -195,11 +195,11 @@ function versionsLabel(a) {
   return a.versions.length > 1 ? `${a.versions.length} sources` : esc(a.versions[0]?.source || "");
 }
 function appRow(a) {
-  return `<div class="row" onclick="openApp('${esc(a.key)}')">${iconHtml(a)}
+  return `<div class="row" data-key="${esc(a.key)}" onclick="openApp(this.dataset.key)">${iconHtml(a)}
     <div class="grow"><div class="ell" style="font-weight:600">${esc(a.name)}</div>
     <div class="ell muted small">${esc(a.subtitle || a.developer || "")}</div>
     <div class="ell muted small">${versionsLabel(a)}</div></div>
-    <button class="pill" onclick="event.stopPropagation();openApp('${esc(a.key)}')">GET</button></div>`;
+    <button class="pill" data-key="${esc(a.key)}" onclick="event.stopPropagation();openApp(this.dataset.key)">GET</button></div>`;
 }
 function featuredView() {
   const q = query.trim().toLowerCase();
@@ -289,8 +289,8 @@ function myAppsView() {
       return `<div class="row">${iconHtml(i)}<div class="grow"><div class="ell" style="font-weight:600">${esc(i.name)}</div>
         <div class="ell muted small">${esc(i.version)} · ${esc(i.bundle_id)}</div>
         <div class="chips"><span class="chip ${cls}">${label}</span>${i.options.increased_memory ? '<span class="chip">More memory</span>' : ""}${i.options.remove_extensions ? '<span class="chip">No extensions</span>' : ""}</div></div>
-        <div style="display:flex;flex-direction:column;gap:6px"><button class="pill" onclick="act('refresh',{bundle_id:'${esc(i.bundle_id)}'})">Refresh</button>
-        <button class="pill" onclick="appMenu('${esc(i.bundle_id)}')">•••</button></div></div>`;
+        <div style="display:flex;flex-direction:column;gap:6px"><button class="pill" data-id="${esc(i.bundle_id)}" onclick="act('refresh',{bundle_id:this.dataset.id})">Refresh</button>
+        <button class="pill" data-id="${esc(i.bundle_id)}" onclick="appMenu(this.dataset.id)">•••</button></div></div>`;
     }).join("") : `<div class="empty">Apps you install from BariStore appear here.<br>A free Apple ID keeps them for 7 days; refresh before that.</div>`}</div>
     <div class="small muted" style="text-align:center">A free Apple ID can have 3 sideloaded apps installed at a time. BariStore itself does not count: it runs in Minis.</div>
   </div>`;
@@ -321,7 +321,7 @@ function optionsView() {
     <h2>Sources</h2>
     <div class="card">${C.sources.map((s) => `<div class="row"><div class="grow"><div class="ell">${esc(s.name)}</div><div class="ell muted small">${esc(s.url)}</div>
       ${s.error ? `<div class="small" style="color:var(--warn)">${esc(s.error)}</div>` : ""}</div>
-      <button class="pill" onclick="if(confirm('Remove this source?')) act('source_remove',{url:'${esc(s.url)}'}).then(loadCatalog)">Remove</button></div>`).join("") || '<div class="empty">No sources</div>'}
+      <button class="pill" data-url="${esc(s.url)}" onclick="if(confirm('Remove this source?')) act('source_remove',{url:this.dataset.url}).then(loadCatalog)">Remove</button></div>`).join("") || '<div class="empty">No sources</div>'}
       <button class="btn secondary" onclick="addSource()">Add source</button></div>
     <h2>Appearance</h2>
     <div class="card"><div class="seg">${seg("system", "System")}${seg("light", "Light")}${seg("dark", "Dark")}</div></div>
@@ -360,7 +360,7 @@ function renderSheet() {
         <li>Enter your passcode if asked, then this code.</li><li>Come back to Minis when Settings says it paired.</li></ol>` : ""}
       ${task.error ? `<div class="notice bad">${esc(task.error)}</div>` : `<p>${esc(task.step || "Working…")}</p>`}
       ${task.done ? "" : `<div class="bar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 35}%"></i></div>`}
-      ${task.done ? `${task.error && task.retry ? `<button class="btn" onclick='retry(${JSON.stringify(JSON.stringify(task.retry))})'>Try again</button>` : ""}
+      ${task.done ? `${task.error && task.retry ? `<button class="btn" onclick="retry()">Try again</button>` : ""}
         <button class="btn ${task.error ? "secondary" : ""}" onclick="act('dismiss')">${task.error ? "Close" : "Done"}</button>` : ""}`;
   } else if (sheet?.kind === "detail" && detail) {
     html = detailHtml();
@@ -373,8 +373,8 @@ function renderSheet() {
   } else if (sheet?.kind === "appmenu") {
     const i = (S.installed || []).find((x) => x.bundle_id === sheet.id) || { name: sheet.id };
     html = `<div class="grab"></div><h2 style="margin-top:0">${esc(i.name)}</h2>
-      <button class="btn secondary" onclick="act('place_pairing',{bundle_id:'${esc(sheet.id)}'});closeSheet()">Put the pairing file in this app</button>
-      <button class="btn danger" onclick="if(confirm('Delete ${esc(i.name)} from this iPhone?')){act('delete',{bundle_id:'${esc(sheet.id)}'});closeSheet()}">Delete app</button>
+      <button class="btn secondary" data-id="${esc(sheet.id)}" onclick="act('place_pairing',{bundle_id:this.dataset.id});closeSheet()">Put the pairing file in this app</button>
+      <button class="btn danger" data-id="${esc(sheet.id)}" data-name="${esc(i.name)}" onclick="if(confirm('Delete '+this.dataset.name+' from this iPhone?')){act('delete',{bundle_id:this.dataset.id});closeSheet()}">Delete app</button>
       <button class="btn secondary" onclick="closeSheet()">Close</button>`;
   } else if (sheet?.kind === "doctor") {
     html = `<div class="grab"></div><h2 style="margin-top:0">Diagnostics</h2>
@@ -394,7 +394,7 @@ function renderSheet() {
     if (q && q.kind !== "choice") setTimeout(() => $("#answer")?.focus(), 50); }
 }
 function answer(id, value) { act("answer", { id, value }); }
-function retry(text) { const r = JSON.parse(text); act("dismiss").then(() => act(r.action, r)); }
+function retry() { const r = S?.task?.retry; if (r) act("dismiss").then(() => act(r.action, r)); }
 function copyDoc() {
   const t = $("#doc"); t.select();
   (navigator.clipboard?.writeText(t.value) || Promise.reject()).then(() => alert("Copied"), () => { document.execCommand("copy"); alert("Copied"); });
