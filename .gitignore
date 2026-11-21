@@ -1,39 +1,14 @@
-# Secrets — never commit any of these
-*.p12
-*.pem
-*.key
-# Public trust anchors and CA bundles are NOT secrets — allow the shipped ones.
-!third_party/apple-roots/apple-roots.pem
-!third_party/apple-roots/AppleIncRootCertificate.cer
-!third_party/ca-bundle/cacert.pem
-*.mobileprovision
-*.provisionprofile
-*.rppairing
-*.mobiledevicepairing
-pairing*.plist
-appleid*
-credentials*
-secrets*
-.env
-.env.*
-*.local.json
-*.mobileconfig
-
-# Saved state holds the Apple ID and the UDID — never commit it
-/state/
-
-# Working artifacts
-/dist/
-/build/
-/out/
-*.ipa
-*.app
-/tmp/
-.DS_Store
-__pycache__/
-*.pyc
-
-/tests/*.log
-
 # Rust build output
 /target/
+
+# Never commit secrets or device data
+*.p12
+*.key
+*.mobileprovision
+*.mobiledevicepairing
+pairing*.plist
+account*.plist
+.env
+.env.*
+*.ipa
+.DS_Store

@@ -78,8 +78,6 @@ pub fn endpoint() -> (String, u16) {
 pub struct Tunnel {
     pub control: Control,
     pub stack: Stack,
-    pub client: Ipv6Addr,
-    pub server: Ipv6Addr,
     pub rsd_port: u16,
 }
 
@@ -173,7 +171,7 @@ impl Tunnel {
             }
         });
 
-        Ok(Tunnel { control, stack, client, server, rsd_port })
+        Ok(Tunnel { control, stack, rsd_port })
     }
 }
 

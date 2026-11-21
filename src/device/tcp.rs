@@ -68,7 +68,6 @@ enum Cmd {
 enum State {
     SynSent,
     Established,
-    Closed,
 }
 
 struct Conn {
@@ -446,6 +445,7 @@ impl TcpConn {
     }
 
     /// Whatever has arrived (at least one byte).
+    #[cfg(test)]
     pub async fn read_some(&mut self) -> std::io::Result<Vec<u8>> {
         if self.buf.is_empty() {
             self.fill().await?;

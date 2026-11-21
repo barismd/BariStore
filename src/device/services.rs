@@ -112,7 +112,6 @@ pub async fn amfi_action(session: &Session, action: u64) -> Result<(), String> {
 const AFC_MAGIC: &[u8; 8] = b"CFA6LPAA";
 const OP_STATUS: u64 = 0x01;
 const OP_DATA: u64 = 0x02;
-const OP_READ_DIR: u64 = 0x03;
 const OP_REMOVE: u64 = 0x08;
 const OP_MKDIR: u64 = 0x09;
 const OP_OPEN: u64 = 0x0D;
@@ -185,12 +184,6 @@ impl Afc {
         self.op(OP_REMOVE, &Self::path(path), &[]).await.map(|_| ())
     }
 
-    pub async fn list(&mut self, path: &str) -> Result<Vec<String>, String> {
-        let body = self.op(OP_READ_DIR, &Self::path(path), &[]).await?;
-        Ok(body.split(|b| *b == 0).filter(|s| !s.is_empty() && *s != b"." && *s != b"..")
-            .map(|s| String::from_utf8_lossy(s).into_owned()).collect())
-    }
-
     async fn fopen(&mut self, path: &str, mode: u64) -> Result<u64, String> {
         let mut payload = mode.to_le_bytes().to_vec();
         payload.extend_from_slice(&Self::path(path));
@@ -202,7 +195,7 @@ impl Afc {
         self.op(OP_CLOSE, &handle.to_le_bytes(), &[]).await.map(|_| ())
     }
 
-    pub async fn write_file(&mut self, path: &str, data: &[u8], progress: &mut dyn FnMut(usize, usize))
+    pub async fn write_file(&mut self, path: &str, data: &[u8], progress: &mut (dyn FnMut(usize, usize) + Send))
         -> Result<(), String>
     {
         let handle = self.fopen(path, WRITE_TRUNCATE).await?;
@@ -238,7 +231,7 @@ impl Afc {
 // --- installation_proxy ----------------------------------------------------
 
 /// Uploads `ipa` to /PublicStaging and installs it as a developer package.
-pub async fn install(session: &Session, ipa: &[u8], progress: &mut dyn FnMut(&str, u32)) -> Result<(), String> {
+pub async fn install(session: &Session, ipa: &[u8], progress: &mut (dyn FnMut(&str, u32) + Send)) -> Result<(), String> {
     let remote = format!("/PublicStaging/baristore-{}.ipa", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     {
         let mut afc = Afc::open(session).await?;

@@ -26,12 +26,6 @@ pub fn set(parts: &[Vec<u8>]) -> Vec<u8> {
     tlv(0x31, &parts.concat())
 }
 
-/// SET OF with elements sorted by their encoding (DER canonical order).
-pub fn set_of(mut parts: Vec<Vec<u8>>) -> Vec<u8> {
-    parts.sort();
-    tlv(0x31, &parts.concat())
-}
-
 pub fn int_bytes(big_endian: &[u8]) -> Vec<u8> {
     let mut v: Vec<u8> = big_endian.iter().copied().skip_while(|b| *b == 0).collect();
     if v.is_empty() || v[0] & 0x80 != 0 {
@@ -152,8 +146,6 @@ pub struct CertInfo<'a> {
     pub issuer: &'a [u8],      // full Name encoding
     pub subject: &'a [u8],
     pub spki: &'a [u8],        // full SubjectPublicKeyInfo
-    pub tbs: &'a [u8],
-    pub signature: &'a [u8],   // BIT STRING content without the unused-bits byte
 }
 
 pub fn cert_info(der: &[u8]) -> Result<CertInfo<'_>, String> {
@@ -170,8 +162,6 @@ pub fn cert_info(der: &[u8]) -> Result<CertInfo<'_>, String> {
         issuer: get(2)?,
         subject: get(4)?,
         spki: get(5)?,
-        tbs: parts[0].raw,
-        signature: parts[2].content.get(1..).unwrap_or(&[]),
     })
 }
 

@@ -303,10 +303,6 @@ fn load_or_create_key() -> Result<RsaPrivateKey, String> {
     Ok(key)
 }
 
-pub fn load_key() -> Option<RsaPrivateKey> {
-    RsaPrivateKey::from_pkcs8_der(&std::fs::read(state::path("signing-key.der")).ok()?).ok()
-}
-
 /// PKCS#10 request, PEM, subject CN/O/C as Xcode's.
 fn build_csr(key: &RsaPrivateKey) -> Result<String, String> {
     let rdn = |o: &str, v: Vec<u8>| der::set(&[der::seq(&[der::oid(o), v])]);

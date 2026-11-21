@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 
-pub const METHOD: u8 = 0;
 pub const IDENTIFIER: u8 = 1;
 pub const SALT: u8 = 2;
 pub const PUBLIC_KEY: u8 = 3;

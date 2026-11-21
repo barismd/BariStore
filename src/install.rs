@@ -154,17 +154,23 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: &[u8], opts: &Option
         plan_bundles.insert(b.dir.clone(), Signing { new_id, profile, entitlements });
     }
 
+    const INTERMEDIATES: [&[u8]; 5] = [
+        include_bytes!("../assets/certs/AppleWWDRCAG3.cer"), include_bytes!("../assets/certs/AppleWWDRCAG4.cer"),
+        include_bytes!("../assets/certs/AppleWWDRCAG5.cer"), include_bytes!("../assets/certs/AppleWWDRCAG6.cer"),
+        include_bytes!("../assets/certs/AppleWWDRCAG2.cer"),
+    ];
+    const ROOTS: [&[u8]; 2] = [include_bytes!("../assets/certs/AppleRootCA.cer"), include_bytes!("../assets/certs/AppleRootCAG3.cer")];
     let mut chain = Vec::new();
-    for cert in [&include_bytes!("../assets/certs/AppleWWDRCAG3.cer")[..],
-                 &include_bytes!("../assets/certs/AppleWWDRCAG4.cer")[..],
-                 &include_bytes!("../assets/certs/AppleWWDRCAG5.cer")[..],
-                 &include_bytes!("../assets/certs/AppleWWDRCAG6.cer")[..],
-                 &include_bytes!("../assets/certs/AppleWWDRCAG2.cer")[..]] {
-        if der::cert_info(cert).map(|c| c.subject == leaf_info.issuer).unwrap_or(false) {
-            chain.push(cert.to_vec());
-            chain.push(include_bytes!("../assets/certs/AppleRootCA.cer").to_vec());
-            break;
+    for cert in INTERMEDIATES {
+        let Ok(info) = der::cert_info(cert) else { continue };
+        if info.subject != leaf_info.issuer {
+            continue;
         }
+        chain.push(cert.to_vec());
+        if let Some(root) = ROOTS.iter().find(|r| der::cert_info(r).map(|ri| ri.subject == info.issuer).unwrap_or(false)) {
+            chain.push(root.to_vec());
+        }
+        break;
     }
     if chain.is_empty() {
         return Err("the certificate Apple issued chains to an Apple CA BariStore does not know".into());

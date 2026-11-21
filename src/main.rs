@@ -1,6 +1,8 @@
+mod app;
 mod apple;
 mod der;
 mod device;
+mod doctor;
 mod install;
 mod log;
 mod minis;
@@ -8,20 +10,22 @@ mod pairing;
 mod sign;
 mod siphash;
 mod srp;
+mod store;
+mod web;
 mod state;
 
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: baristore            open the store
        baristore doctor     print a diagnostic report to paste
+       baristore update     install the newest BariStore
        baristore --version";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let _ = std::fs::create_dir_all(state::home());
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
-    let result = runtime.block_on(run(args));
-    match result {
+    match runtime.block_on(run(args)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("baristore: {message}");
@@ -32,11 +36,22 @@ fn main() -> ExitCode {
 
 async fn run(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
-        None => Err("the store UI is not built yet".into()),
+        None => open_store().await,
+        Some("doctor") => {
+            println!("{}", doctor::report().await);
+            Ok(())
+        }
+        Some("update") => {
+            let status = std::process::Command::new("sh").arg("-c")
+                .arg("wget -qO- https://raw.githubusercontent.com/barismd/BariStore/claude/awesome-maxwell-0fhm39/install.sh | sh")
+                .status().map_err(|e| e.to_string())?;
+            if status.success() { Ok(()) } else { Err("the update did not finish".into()) }
+        }
         Some("--version") | Some("-V") => {
             println!("baristore {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        #[cfg(debug_assertions)]
         Some("dev") => dev(&args[1..]).await,
         _ => {
             println!("{USAGE}");
@@ -45,7 +60,25 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-/// Developer commands for interop tests on Linux. Not part of the product.
+async fn open_store() -> Result<(), String> {
+    logf!("baristore {} starting", env!("CARGO_PKG_VERSION"));
+    if !app::minis_ok() {
+        println!("Note: this is not Open Minis 1.16+ (no minis-bonjour): pairing will not work here.");
+    }
+    let store = app::App::new();
+    let url = web::serve(store.clone()).await?;
+    println!("BariStore {}", env!("CARGO_PKG_VERSION"));
+    if !minis::open(&url) {
+        println!("Open this address in Minis's browser: {url}");
+    }
+    println!("The store is open over the terminal. Keep Minis open while installing.");
+    println!("Press Ctrl-C here to quit.");
+    let _ = tokio::signal::ctrl_c().await;
+    Ok(())
+}
+
+/// Developer commands for interop tests (debug builds only).
+#[cfg(debug_assertions)]
 async fn dev(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("pairhost") => {
@@ -67,7 +100,7 @@ async fn dev(args: &[String]) -> Result<(), String> {
                 peer: Default::default(),
             };
             let tunnel = device::session::Tunnel::open(&record).await.map_err(|e| e.to_string())?;
-            println!("tunnel: {} -> {} rsd {}", tunnel.client, tunnel.server, tunnel.rsd_port);
+            println!("tunnel: rsd {}", tunnel.rsd_port);
             match tokio::time::timeout(std::time::Duration::from_secs(5), tunnel.stack.connect(tunnel.rsd_port)).await {
                 Ok(Err(e)) => println!("tcp over the echo link: {e}"),
                 Ok(Ok(_)) => println!("tcp over the echo link: connected"),

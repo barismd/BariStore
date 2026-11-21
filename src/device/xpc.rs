@@ -113,13 +113,6 @@ impl Xpc {
         decode(data, &mut at, 0)
     }
 
-    pub fn get(&self, key: &str) -> Option<&Xpc> {
-        match self {
-            Xpc::Dict(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
     pub fn to_plist(&self) -> Value {
         match self {
             Xpc::Null => Value::String(String::new()),
