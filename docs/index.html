@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BariStore · an app store for iPhone, no computer needed</title>
+<meta name="description" content="Install and refresh sideloaded apps on your iPhone or iPad with a free Apple ID. No computer, no second device. Runs in Open Minis.">
+<meta property="og:title" content="BariStore">
+<meta property="og:description" content="An app store for iPhone and iPad that needs no computer. Free Apple ID, quick refresh, JIT, open source.">
+<meta property="og:image" content="https://barismd.github.io/BariStore/logo.png">
+<link rel="icon" href="logo.png">
+<link rel="apple-touch-icon" href="logo.png">
+<style>
+:root {
+  --brand: #15337F; --brand-2: #0A1B4D; --accent: #2A55C6;
+  --bg: #F3F5FA; --card: #FFFFFF; --text: #0E1525; --muted: #5E6779; --line: #E3E7F0; --chip: #EEF1F8;
+  --good: #1F9D55; --shadow: 0 1px 2px rgba(10,27,77,.06), 0 10px 30px rgba(10,27,77,.08);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0A0F1E; --card: #131A2E; --text: #EEF1F8; --muted: #9AA3B8; --line: #263052; --chip: #1F2846;
+          --accent: #9DB4FF; --shadow: none; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 17px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+h1, h2, h3 { letter-spacing: -.02em; line-height: 1.15; margin: 0; }
+h2 { font-size: clamp(26px, 4vw, 34px); margin-bottom: 10px; }
+h3 { font-size: 18px; margin-bottom: 4px; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+section { padding: 56px 0 0; }
+.lead { font-size: 18px; color: var(--muted); max-width: 640px; }
+
+/* Hero */
+.hero { color: #fff; background:
+  radial-gradient(110% 80% at 15% 0%, rgba(255,255,255,.16), transparent 60%), linear-gradient(var(--brand), var(--brand-2));
+  padding: calc(28px + env(safe-area-inset-top)) 0 0; overflow: hidden; }
+.nav { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; }
+.nav img { width: 34px; height: 34px; }
+.nav .grow { flex: 1; }
+.nav a { color: #fff; opacity: .85; font-weight: 600; font-size: 15px; }
+.hero-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 32px; align-items: end; padding-top: 40px; }
+.hero h1 { font-size: clamp(36px, 6vw, 58px); }
+.hero .sub { font-size: clamp(17px, 2.2vw, 20px); opacity: .85; margin: 16px 0 26px; max-width: 520px; }
+.cta { display: flex; gap: 10px; flex-wrap: wrap; padding-bottom: 44px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 22px; border-radius: 14px; font-weight: 650;
+  background: #fff; color: var(--brand); }
+.btn.ghost { background: rgba(255,255,255,.14); color: #fff; }
+.btn:hover { text-decoration: none; filter: brightness(1.05); }
+.phones { display: flex; justify-content: center; gap: 14px; align-self: end; }
+.phone { width: 46%; max-width: 230px; border-radius: 28px 28px 0 0; overflow: hidden; border: 6px solid rgba(255,255,255,.16);
+  border-bottom: 0; box-shadow: 0 -10px 40px rgba(0,0,0,.3); }
+.phone img { display: block; width: 100%; height: auto; }
+.phone.second { transform: translateY(36px); }
+
+/* Features */
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 24px; }
+.card { background: var(--card); border-radius: 18px; padding: 20px; box-shadow: var(--shadow); }
+.card .ico { width: 40px; height: 40px; border-radius: 12px; background: var(--chip); color: var(--accent);
+  display: grid; place-items: center; margin-bottom: 12px; }
+.card .ico svg { width: 22px; height: 22px; }
+.card p { color: var(--muted); font-size: 15px; }
+
+/* Install */
+.steps { counter-reset: s; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 24px; }
+.step { counter-increment: s; display: flex; gap: 16px; align-items: flex-start; }
+.step::before { content: counter(s); flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--brand);
+  color: #fff; font-weight: 700; display: grid; place-items: center; margin-top: 2px; }
+.step > div { flex: 1; min-width: 0; }
+.cmd { display: flex; align-items: center; gap: 8px; margin-top: 10px; background: #0B1226; color: #E6ECFF;
+  border-radius: 12px; padding: 12px 12px 12px 16px; font: 14px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
+.cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; }
+.copy { flex: none; border: 0; border-radius: 9px; padding: 8px 12px; font: 600 13px system-ui, sans-serif;
+  background: #2A55C6; color: #fff; cursor: pointer; }
+.need { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+.need div { background: var(--card); border-radius: 14px; padding: 12px 14px; box-shadow: var(--shadow); font-size: 15px; }
+.need b { display: block; font-size: 13px; color: var(--muted); font-weight: 600; }
+
+/* Screens */
+.screens { display: flex; gap: 14px; overflow-x: auto; margin: 24px -16px 0; padding: 0 16px 8px; scroll-snap-type: x mandatory; }
+.screens figure { margin: 0; flex: none; width: 230px; scroll-snap-align: start; }
+.screens img { width: 100%; border-radius: 22px; display: block; box-shadow: var(--shadow); }
+.screens figcaption { font-size: 14px; color: var(--muted); margin-top: 8px; text-align: center; }
+
+/* Safety + FAQ */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 24px; }
+ul.checks { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+ul.checks li { padding-left: 30px; position: relative; color: var(--muted); font-size: 15px; }
+ul.checks li b { color: var(--text); }
+ul.checks li::before { content: "✓"; position: absolute; left: 0; top: 0; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--good); color: #fff; font-size: 12px; display: grid; place-items: center; font-weight: 700; }
+details { background: var(--card); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow); }
+details + details { margin-top: 10px; }
+summary { font-weight: 650; cursor: pointer; }
+details p { color: var(--muted); font-size: 15px; margin-top: 8px; }
+footer { padding: 56px 0 calc(32px + env(safe-area-inset-bottom)); color: var(--muted); font-size: 14px; text-align: center; }
+
+@media (max-width: 820px) {
+  .hero-grid { grid-template-columns: 1fr; padding-top: 28px; }
+  .cta { padding-bottom: 8px; }
+  .phones { padding-top: 12px; }
+  .grid { grid-template-columns: 1fr 1fr; }
+  .need { grid-template-columns: 1fr 1fr; }
+  .two { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  .grid { grid-template-columns: 1fr; }
+  .phone { border-radius: 22px 22px 0 0; border-width: 4px; }
+  .phone.second { transform: translateY(24px); }
+  .cmd code { white-space: pre-wrap; word-break: break-all; }
+}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <nav class="nav"><img src="logo.png" alt=""><span>BariStore</span><span class="grow"></span>
+      <a href="https://github.com/barismd/BariStore">GitHub</a></nav>
+    <div class="hero-grid">
+      <div>
+        <h1>An app store for your iPhone.<br>No computer needed.</h1>
+        <p class="sub">Install, refresh and update sideloaded apps with a free Apple ID, right on the iPhone or iPad you hold.</p>
+        <div class="cta">
+          <a class="btn" href="#install">Install BariStore</a>
+          <a class="btn ghost" href="https://github.com/barismd/BariStore">Source code</a>
+        </div>
+      </div>
+      <div class="phones">
+        <div class="phone"><img src="screens/featured.jpg" alt="BariStore's Featured page"></div>
+        <div class="phone second"><img src="screens/my-apps.jpg" alt="My Apps: installed apps and days left"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section>
+    <h2>Everything on one device</h2>
+    <p class="lead">BariStore pairs with the iPhone it runs on, signs apps there and installs them there. Nothing else to buy, plug in or keep running.</p>
+    <div class="grid">
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M11 18.5h2"/></svg></div>
+        <h3>No computer, no second device</h3><p>Pairing, signing and installing all happen on the iPhone itself.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M4.2 7.5l2.6 1.5M17.2 15l2.6 1.5M4.2 16.5l2.6-1.5M17.2 9l2.6-1.5"/><circle cx="12" cy="12" r="3.5"/></svg></div>
+        <h3>No Developer Mode beforehand</h3><p>It does not need to have been on before: pairing makes it appear in Settings, and BariStore shows where to tap.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><path d="M17 14v6M14 17h6"/></svg></div>
+        <h3>Uses none of your 3 app slots</h3><p>BariStore runs inside Open Minis, so all three free-account slots stay yours. It looks and works like an App Store app.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg></div>
+        <h3>Refresh in seconds</h3><p>Like SideStore, a refresh only renews the apps' profiles: nothing is downloaded, signed or uploaded again.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
+        <h3>JIT with one tap</h3><p>Open emulators and other JIT apps with JIT on, the way StikDebug does, without another app.</p></div>
+      <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg></div>
+        <h3>Sources, updates, beta tracks</h3><p>AltStore and SideStore sources, any IPA from Files, one-tap updates and an opt-in for nightly or alpha builds per app.</p></div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <p class="lead">About five minutes, once.</p>
+    <div class="need">
+      <div><b>Device</b>iPhone or iPad on iOS 27+</div>
+      <div><b>Apps</b><a href="https://apps.apple.com/app/id6759188481">Open Minis</a> and <a href="https://apps.apple.com/app/id6755608044">LocalDevVPN</a></div>
+      <div><b>Apple ID</b>A free one is enough</div>
+      <div><b>Network</b>Wi-Fi with LocalDevVPN on</div>
+    </div>
+    <div class="steps">
+      <div class="step"><div><h3>Get the two apps</h3>
+        <p class="muted">Install Open Minis and LocalDevVPN from the App Store, join Wi-Fi and connect LocalDevVPN.</p></div></div>
+      <div class="step"><div><h3>Paste one line into Open Minis's terminal</h3>
+        <div class="cmd"><code id="cmd">wget -qO- https://barismd.github.io/BariStore/install.sh | sh</code><button class="copy" id="copy" type="button">Copy</button></div>
+        <p class="muted" style="margin-top:8px">It downloads the latest release, checks its checksum and opens the store. Later, just type <b>baristore</b>.</p></div></div>
+      <div class="step"><div><h3>Follow the setup</h3>
+        <p class="muted">Pair: Settings shows <b>Pair with BariStore</b>, you type the code from the notification. Then sign in with your Apple ID. That is all.</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>A look inside</h2>
+    <div class="screens">
+      <figure><img src="screens/featured.jpg" alt="" loading="lazy"><figcaption>Featured apps and sources</figcaption></figure>
+      <figure><img src="screens/app.jpg" alt="" loading="lazy"><figcaption>An app, its versions and options</figcaption></figure>
+      <figure><img src="screens/my-apps.jpg" alt="" loading="lazy"><figcaption>Your apps, days left and App IDs</figcaption></figure>
+      <figure><img src="screens/setup.jpg" alt="" loading="lazy"><figcaption>Setup, step by step</figcaption></figure>
+    </div>
+  </section>
+
+  <section>
+    <div class="two">
+      <div>
+        <h2>Safe by design</h2>
+        <ul class="checks">
+          <li><b>Your password never leaves the iPhone</b> and is never saved: Apple's sign-in turns it into a one-time proof on the device.</li>
+          <li><b>No BariStore server.</b> No accounts, no analytics. BariStore talks only to Apple, an anisette server and the sources you add.</li>
+          <li><b>The anisette server never sees your Apple ID.</b> It only supplies device-identity data; you can choose your own.</li>
+          <li><b>Open source.</b> BariStore (MIT), Open Minis and the stores it offers (SideStore, LiveContainer, AltStore) are all open source.</li>
+          <li><b>Your keys stay with you:</b> the pairing record and signing key are stored privately inside Open Minis.</li>
+        </ul>
+      </div>
+      <div>
+        <h2>Questions</h2>
+        <details><summary>Do apps still expire after 7 days?</summary>
+          <p>Yes, that is Apple's rule for free Apple IDs. BariStore shows the days and hours left; Refresh all renews every app in seconds.</p></details>
+        <details><summary>How many apps can I install?</summary>
+          <p>Apple allows 3 at a time on a free Apple ID (BariStore itself does not count). LiveContainer, one tap away in Featured, runs many apps inside one.</p></details>
+        <details><summary>Does it work on mobile data?</summary>
+          <p>Installing needs Wi-Fi with LocalDevVPN connected. Browsing the store works anywhere.</p></details>
+        <details><summary>What if something goes wrong?</summary>
+          <p>Options › Log gives a report without passwords or keys. Open an issue on GitHub with it.</p></details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="wrap">
+  BariStore · MIT licence · <a href="https://github.com/barismd/BariStore">github.com/barismd/BariStore</a><br>
+  Not affiliated with Apple. Apps are downloaded from their publishers when you install them.
+</footer>
+
+<script>
+document.getElementById("copy").addEventListener("click", async () => {
+  const b = document.getElementById("copy");
+  try { await navigator.clipboard.writeText(document.getElementById("cmd").textContent); b.textContent = "Copied"; }
+  catch (e) { getSelection().selectAllChildren(document.getElementById("cmd")); b.textContent = "Selected"; }
+  setTimeout(() => { b.textContent = "Copy"; }, 1800);
+});
+</script>
+</body>
+</html>
