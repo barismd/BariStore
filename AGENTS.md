@@ -16,11 +16,11 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   `_remotepairing-pairable-host._tcp` Bonjour service (device-proven: no
   NSBonjourServices entry, no multicast entitlement, raw announcements never
   showed an entry on iOS 27.2.1), Minis does (`minis-bonjour advertise`).
-- Store spec: Featured (search, category chips, a two-column grid of tiles
-  with short descriptions and screenshots, Add IPA, Sources with "add" on top;
-  owner, 1.0.1: a tile shows its screenshots whole and upright, side by side
-  (two in an iPhone's tile, three in an iPad's), landscape ones one above the
-  other, a single one on a blurred copy of itself, never a cropped top;
+- Store spec: Featured (search, category chips, a two-column grid of short
+  tiles: icon, name, two lines of text, GET; Add IPA, Sources with "add" on
+  top; owner, 1.1.0: no screenshots in tiles (they loaded slowly; short
+  tiles show more apps), screenshots only on the app's page, installed apps
+  not listed (a search still finds them);
   BariStore picks AltStore, SideStore, LiveContainer+SideStore, LiveContainer,
   stable + nightly, only plain LiveContainer under Recommended (owner,
   2026-11-22); the three stores under a "Stores" category, LiveContainer
@@ -46,9 +46,11 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   2026-11-21): built in `src/device/jit.rs`.
 - Owner, 1.1.0: App icon (Choose a picture, Reset) and Custom App ID on the
   install sheet; Install to LiveContainer on it (store app and added IPA,
-  shown when BariStore installed a LiveContainer, not on LiveContainer's
-  own page); Sources › Add to LiveContainer; My Apps › ••• › Turn on
-  Increased Memory Limit, Change icon, Use its own icon again.
+  not on LiveContainer's own page), shown only when LiveContainer is on the
+  iPhone: BariStore installed it, or the iPhone's app list (asked when
+  BariStore connects and with the App IDs) has a com.kdt.livecontainer… or
+  an app called LiveContainer; My Apps › ••• › Turn on Increased Memory
+  Limit, Change icon, Use its own icon again.
 - Custom App ID: what is typed (letters, digits, '-', dots, one dot at
   least) with ".TEAM" appended as BariStore's own are: an App ID belongs to
   one developer everywhere. Apple refusing it says so.
@@ -76,12 +78,19 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   extensions; owner, 1.1.0: an update turned memory off).
 - Install to LiveContainer: `livecontainer://install?url=` (LiveContainer
   LCAppListView.handleURL; its background URLSession downloads, ATS allows
-  any load) with the source's own download address for store apps; an
+  any load) with the source's own download address for store apps. An app
+  from one of the user's AltSources goes through LiveContainer's own Sources
+  (owner, 1.1.0): when LiveContainer does not list that source
+  (LCAltStoreSourceURLs in its preferences, read through house_arrest), it
+  gets `livecontainer://source?url=` instead and shows the source's apps,
+  the app installed from there with a tap: iOS lets a background app open no
+  other app, so source and install cannot both be sent (and a source it has
+  already makes it show "duplicate"). Unreadable preferences: installed
+  directly. An
   added IPA is served once from BariStore at
   http://127.0.0.1:<port>/share/<128-bit random>/<file> (no page token,
   web.rs `Share`), under the keep-alive, until one request got it all (2
-  min to start, 1 min without progress). `livecontainer://source?url=`
-  adds an AltSource to LiveContainer's own Sources tab. Untested on device.
+  min to start, 1 min without progress). Untested on device.
 - Install sheet App IDs (owner, 1.0.2: a deleted app's own App ID showed
   "New App ID"; a newer build of an added IPA became a second app), best
   first: Replace each copy BariStore installed of the same app (original
@@ -193,13 +202,14 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   bounded, one icon and two screenshots at a time (the prefetch takes one
   turn at most), and a picture being made is not made again for a second
   request (the page and the prefetch asked for the same ones); one shared HTTP client
-  (TLS handshakes are slow on the emulated CPU); the first 12 tiles' first
-  two screenshots are made ready after each catalog refresh; two tokio
-  workers.
-  The page shows Featured 12 tiles at a time (the next 12 as the end comes
-  near, the first 12 again on a new category or search) and loads pictures
-  3 at a time, those near the screen first, each with a spinner until it is
-  there (owner, 1.0.0: pictures came slowly with every one asked at once).
+  (TLS handshakes are slow on the emulated CPU); every app's icon is made
+  ready after each catalog refresh; two tokio workers.
+  The page shows Featured 30 tiles at a time (the next 30 as the end comes
+  near, the first 30 again on a new category or search; 12 before the
+  tiles got short) and loads pictures a few at a time, those near the
+  screen first, each with a spinner until it is there (owner, 1.0.0:
+  pictures came slowly with every one asked at once): icons 8 at a time,
+  screenshots 3.
   Pictures it showed once skip that queue when the page is drawn again
   (owner, 1.0.1: the new tiles loaded slower; each category switch sent
   every picture through the queue again).
@@ -355,9 +365,11 @@ back (modes, CodeResources hashes, icon sizes, Info.plist); a share served
 whole and gone once dropped; the real server's icon upload (bad picture
 refused) and custom: icon; the page in Playwright against a mock server
 (Custom App ID with the team appended, icon chosen and sent, Replace
-starting with memory on, Install to LiveContainer offered and sent, Add to
-LiveContainer, Turn on Increased Memory Limit and Change icon with and
-without the IPA kept, Clear cache's words).
+starting with memory on, Install to LiveContainer offered and sent, hidden
+without LiveContainer and shown for one only in the iPhone's app list,
+Turn on Increased Memory Limit and Change icon with and without the IPA
+kept, Clear cache's words, short tiles without screenshots, installed apps
+only in search, 30 then 60 tiles).
 Linux-verified for 1.0.2: the page in Playwright against a mock server
 (App ID choices: own free, own reused by another app, an installed copy,
 New on request, an added IPA over its installed copy, its icon in the sheet

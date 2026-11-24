@@ -138,24 +138,10 @@ a { color: var(--accent); }
 .cat.on { background: var(--brand); color: #fff; }
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
 /* Tiles off screen are neither laid out nor painted (long catalogs). */
+/* A tile: icon, name, a short text and GET; screenshots only on the app's page (owner, 1.1.0: they loaded slowly,
+   and short tiles show more apps). */
 .tile { background: var(--card); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; display: flex;
-  flex-direction: column; cursor: pointer; min-width: 0; container-type: inline-size; }
-/* A tile's screenshots, whole and upright, side by side: two in an iPhone's tile, three in an iPad's wider one.
-   Landscape ones (games) go one above the other; a single one sits on a blurred copy of itself. */
-.strip { --h: min(calc((100cqw - 22px) / .93), 200px); position: relative; display: flex; justify-content: center; gap: 6px;
-  height: calc(var(--h) + 16px); padding: 8px; background: var(--chip); overflow: hidden; }
-.strip .pic { position: relative; flex: none; width: calc(var(--h) * .462); height: var(--h); display: flex;
-  align-items: center; justify-content: center; }
-.strip .pic:nth-child(n+3) { display: none; }
-@container (min-width: 300px) { .strip .pic:nth-child(3) { display: flex; } }
-.strip img { display: block; max-width: 100%; max-height: 100%; min-width: 1px; min-height: 1px; border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0,0,0,.18); }
-.strip.wide { flex-direction: column; align-items: stretch; }
-.strip.wide .pic { width: auto; height: calc((var(--h) - 6px) / 2); }
-.strip.wide .pic:nth-child(n+3) { display: none; }
-.strip.one .pic { width: 100%; height: var(--h); }
-.strip.one::before { content: ""; position: absolute; inset: -24px; background: var(--shot, none) center / cover;
-  filter: blur(18px) saturate(1.3); opacity: .55; }
+  flex-direction: column; cursor: pointer; min-width: 0; }
 /* Pictures fade in once loaded instead of popping in line by line; a spinner turns until then. */
 img.fade { opacity: 0; transition: opacity .25s ease-out; }
 img.fade.ok { opacity: 1; }
@@ -169,7 +155,7 @@ img.fade.ok { opacity: 1; }
 .tile .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
 .tile .head { display: flex; gap: 10px; align-items: center; min-width: 0; }
 .tile .icon { width: 44px; height: 44px; border-radius: 11px; font-size: 18px; }
-.tile .desc { font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tile .desc { font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .tile .pill { align-self: flex-start; margin-top: auto; padding: 5px 14px; font-size: 14px; }
 .hero .desc { color: rgba(255,255,255,.8); font-size: 14px; padding: 0 0 12px; }
 .shots { display: flex; gap: 10px; overflow-x: auto; margin: 8px -16px 0; padding: 4px 16px; scroll-snap-type: x mandatory; scrollbar-width: none; }
@@ -248,22 +234,25 @@ function pic(url, dropBox) {
   return `<img class="fade" data-src="${esc(url)}" alt="" decoding="async"${dropBox ? ' data-drop="1"' : ""}>`;
 }
 /** A few pictures at a time, those near the screen first: BariStore makes each one ready on the iPhone, and
- *  dozens at once only made every one of them slow. */
-const PICS_AT_ONCE = 3;
-let picQueue = [], picsLoading = 0;
+ *  dozens at once only made every one of them slow. Icons have a wider lane of their own: they are small and made
+ *  ready after each catalog refresh, and Featured's short tiles show many at once. */
+const LANES = { icon: { max: 8, busy: 0, queue: [] }, shot: { max: 3, busy: 0, queue: [] } };
+const laneOf = (img) => img.closest(".icon") ? LANES.icon : LANES.shot;
 const picObserver = new IntersectionObserver((entries) => {
-  for (const e of entries) if (e.isIntersecting) { picObserver.unobserve(e.target); picQueue.push(e.target); }
+  for (const e of entries) if (e.isIntersecting) { picObserver.unobserve(e.target); laneOf(e.target).queue.push(e.target); }
   pumpPics();
 }, { rootMargin: "300px 300px" });
 /** Pictures shown once already: when the page is drawn again (another category, a search, the catalog refreshed)
  *  they come straight from the browser's cache instead of waiting for a turn. */
 const shownPics = new Set();
 function pumpPics() {
-  while (picsLoading < PICS_AT_ONCE && picQueue.length) {
-    const img = picQueue.shift();
-    if (!img.isConnected) continue;
-    picsLoading++;
-    loadPic(img, () => { picsLoading--; pumpPics(); });
+  for (const lane of Object.values(LANES)) {
+    while (lane.busy < lane.max && lane.queue.length) {
+      const img = lane.queue.shift();
+      if (!img.isConnected) continue;
+      lane.busy++;
+      loadPic(img, () => { lane.busy--; pumpPics(); });
+    }
   }
 }
 /** Loads one picture into its box; `then` once it is there or failed. */
@@ -272,30 +261,17 @@ function loadPic(img, then) {
   const done = (ok) => {
     if (finished) return;
     finished = true;
-    const box = img.parentNode, strip = box?.parentNode;
+    const box = img.parentNode;
     if (box) box.classList.remove("loading");
     if (ok) { img.classList.add("ok"); shownPics.add(img.dataset.src); }
     else if (img.dataset.drop && box) box.remove();
     else img.remove();
-    if (strip?.classList.contains("strip")) { if (strip.children.length) placeShot(strip); else strip.remove(); }
     if (then) then();
   };
   img.onload = () => done(true);
   img.onerror = () => done(false);
   setTimeout(() => done(img.complete && img.naturalWidth > 0), 30000);
   img.src = img.dataset.src;
-}
-/** A tile's strip follows its first screenshot: landscape ones go one above the other. Screenshots of the other
- *  shape leave (the next one takes their place), and a single one left gets a blurred copy of itself behind it. */
-function placeShot(strip) {
-  const first = strip.firstElementChild.querySelector("img.ok");
-  if (!first) return;
-  const wide = first.naturalWidth > first.naturalHeight;
-  strip.classList.toggle("wide", wide);
-  strip.querySelectorAll("img.ok").forEach((img) => {
-    if (img !== first && img.naturalWidth > img.naturalHeight !== wide) img.parentNode.remove();
-  });
-  if (strip.children.length === 1) { strip.classList.add("one"); strip.style.setProperty("--shot", `url("${first.src}")`); }
 }
 /** Hands the new pictures in `root` to the loader, and watches Featured's "more" row. */
 function hydrate(root) {
@@ -428,10 +404,8 @@ function getButton(a) {
   return `<button class="pill" data-key="${esc(a.key)}" onclick="event.stopPropagation();openApp(this.dataset.key)">${isInstalled(a) ? "VIEW" : "GET"}</button>`;
 }
 function tile(a) {
-  const shots = (a.screenshots || []).slice(0, 3);
   const text = shortText(a);
   return `<div class="tile" data-key="${esc(a.key)}" onclick="openApp(this.dataset.key)">
-    ${shots.length ? `<div class="strip${shots.length === 1 ? " one" : ""}">${shots.map((u) => `<div class="pic loading">${pic(shotUrl(u, 640), true)}</div>`).join("")}</div>` : ""}
     <div class="body"><div class="head">${iconHtml(a)}<div class="grow"><div class="ell" style="font-weight:600">${esc(a.name)}</div>
       <div class="ell muted small">${esc(a.developer || versionsLabel(a))}</div></div></div>
       ${text ? `<div class="desc">${esc(text)}</div>` : ""}${getButton(a)}</div></div>`;
@@ -453,13 +427,15 @@ function featuredView() {
   </div>`;
 }
 /** Featured shows the list a batch at a time: the next one when its end comes near (scrolling), the first one
- *  again when the category or the search changes. */
-const BATCH = 12;
+ *  again when the category or the search changes. Short tiles fit many on a screen (an iPad's more): 30. */
+const BATCH = 30;
 let shown = BATCH;
 const moreObserver = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) showMore(); },
   { rootMargin: "600px 0px" });
+/** Apps not installed (owner, 1.1.0: installed ones live in My Apps); a search finds those too. */
 function listedApps() {
-  return C.apps.filter((a) => matches(a) && (!category || categoryOf(a) === category))
+  const searching = query.trim() !== "";
+  return C.apps.filter((a) => matches(a) && (!category || categoryOf(a) === category) && (searching || !isInstalled(a)))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 function showMore() {
@@ -492,17 +468,15 @@ function listHtml() {
 function renderList() { shown = BATCH; const l = $("#list"); if (l) { l.innerHTML = listHtml(); hydrate(l); } }
 
 function sourcesSheet() {
-  const lc = hasLiveContainer();
   const rows = C.sources.map((s) => `<div class="row"><div class="grow"><div class="ell">${esc(s.name)}</div>
-      <div class="ell muted small">${esc(s.url)}</div>${s.error ? `<div class="note">${esc(s.error)}</div>` : ""}
-      ${lc ? `<button class="link small" style="padding:6px 0 0" data-url="${esc(s.url)}" onclick="lcSource(this.dataset.url)">Add to LiveContainer</button>` : ""}</div>
+      <div class="ell muted small">${esc(s.url)}</div>${s.error ? `<div class="note">${esc(s.error)}</div>` : ""}</div>
       <button class="pill quiet" data-url="${esc(s.url)}" data-name="${esc(s.name)}" onclick="removeSource(this.dataset.url, this.dataset.name)">Remove</button></div>`).join("");
   const suggested = (C.suggested || []).map((s) => `<div class="row"><div class="grow"><div class="ell">${esc(s.name)}</div>
       <div class="ell muted small">${esc(s.url)}</div></div>
       <button class="pill" data-url="${esc(s.url)}" onclick="addSource(this.dataset.url)">Add</button></div>`).join("");
   return {
     title: "Sources",
-    body: `<p class="muted small">AltSources (AltStore and SideStore format) whose apps appear in Featured.${lc ? " Add to LiveContainer gives one to LiveContainer's Sources too." : ""}</p>
+    body: `<p class="muted small">AltSources (AltStore and SideStore format) whose apps appear in Featured.</p>
       <h2>Add a source</h2>
       <input class="field" id="srcurl" type="url" autocapitalize="none" spellcheck="false" placeholder="https://example.com/apps.json">
       <button class="btn" onclick="addSource($('#srcurl').value)">Add source</button>
@@ -510,11 +484,6 @@ function sourcesSheet() {
       <div class="card">${rows || '<div class="empty">No sources.</div>'}</div>
       ${suggested ? `<h2>Suggested</h2><div class="card">${suggested}</div>` : ""}`,
   };
-}
-/** LiveContainer's own Sources tab takes the source: its apps then install into LiveContainer from there. */
-async function lcSource(url) {
-  const r = await act("lc_source", { url });
-  toast(r.message);
 }
 async function addSource(url) {
   const r = await act("source_add", { url: (url || "").trim() });
@@ -709,11 +678,13 @@ function squareIcon(file) {
     img.src = url;
   });
 }
-/** Whether LiveContainer is on this iPhone (BariStore installed it): Install to LiveContainer is offered then
+/** Whether LiveContainer is on this iPhone, whoever installed it (the iPhone's app list, asked when BariStore
+ *  connects and with the App IDs; BariStore's own list before that): Install to LiveContainer is offered then
  *  (`app`: not for LiveContainer itself). */
 function hasLiveContainer(app) {
   return !app?.bundle_id?.startsWith("com.kdt.livecontainer")
-    && (S.installed || []).some((i) => i.kind === "livecontainer" || i.kind === "livecontainer+sidestore");
+    && ((S.installed || []).some((i) => i.kind === "livecontainer" || i.kind === "livecontainer+sidestore")
+      || (S.device_apps || []).some((d) => d.bundle_id.startsWith("com.kdt.livecontainer") || d.name === "LiveContainer"));
 }
 function detailSheet() {
   const a = detail;
@@ -767,8 +738,8 @@ async function install() {
   const r = await act("install", { key: a.key, version: pickVersion, name: a.name, ...o });
   if (!r.ok) toast(r.message);
 }
-/** LiveContainer downloads the app from its source itself and keeps it in its own container: no App ID, no
- *  signing here. */
+/** LiveContainer keeps the app in its own container: no App ID, no signing here. An app from one of your sources
+ *  goes through LiveContainer's Sources (the source is given to it first when it does not list it). */
 function installToLc() {
   const a = detail;
   closeSheet();

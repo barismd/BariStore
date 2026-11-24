@@ -78,12 +78,6 @@ pub struct App {
     busy: Arc<AsyncMutex<()>>,
 }
 
-/// Featured's first tiles whose screenshots are made ready after each
-/// catalog refresh, and how many of each (the two an iPhone's tile shows;
-/// an iPad's shows three).
-const FIRST_TILES: usize = 12;
-const TILE_SCREENSHOTS: usize = 2;
-
 impl App {
     pub fn new() -> App {
         let app = App {
@@ -457,7 +451,7 @@ impl App {
     }
 
     /// Fetches every source again (one fetch at a time: a second call waits
-    /// for the running one), then makes the first pictures ready.
+    /// for the running one), then makes every app's icon ready.
     async fn refresh_catalog_now(&self) {
         let running = {
             let mut i = self.inner.lock().unwrap();
@@ -477,11 +471,6 @@ impl App {
         // Every picture the page may still show; the cache drops the rest.
         let mut keep: Vec<String> = catalog.iter().flat_map(|a| a.screenshots.iter().chain([&a.icon])).cloned().collect();
         keep.extend(install::installed().into_iter().flat_map(|i| [i.shown_icon(), i.icon_url]));
-        // The first screenshots Featured shows (its order: by name).
-        let mut shown: Vec<&store::App> = catalog.iter().filter(|a| !a.screenshots.is_empty()).collect();
-        shown.sort_by_key(|a| a.name.to_lowercase());
-        let shots: Vec<String> = shown.iter().take(FIRST_TILES)
-            .flat_map(|a| a.screenshots.iter().take(TILE_SCREENSHOTS)).cloned().collect();
         {
             let mut i = self.inner.lock().unwrap();
             i.catalog = catalog;
@@ -494,7 +483,6 @@ impl App {
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || crate::icons::prune(&keep)).await;
             crate::icons::prefetch(icons, crate::icons::ICON, 2).await;
-            crate::icons::prefetch(shots, crate::icons::TILE, 1).await;
         });
     }
 
@@ -973,18 +961,58 @@ impl App {
         self.resign(&session, &apple, entry).await
     }
 
-    /// Install to LiveContainer, for an app from a source: LiveContainer
-    /// downloads the IPA itself (livecontainer://install?url=, its
-    /// LCAppListView.handleURL) and keeps the app in its own container.
+    /// Install to LiveContainer, for an app from a source. An app from one
+    /// of the user's AltSources goes through LiveContainer's own Sources:
+    /// when LiveContainer does not list that source yet, it gets it
+    /// (livecontainer://source?url=, LCAltStoreSourcesView) and shows its
+    /// apps, this one installed from there with a tap. Otherwise
+    /// LiveContainer downloads the IPA itself (livecontainer://install?url=,
+    /// LCAppListView.handleURL; what its Sources tab does too). iOS lets an
+    /// app open only one other app at a time, so both cannot be sent.
     pub async fn lc_install(&self, key: &str, version: usize) -> Result<String, String> {
-        let (name, url) = {
+        let (name, v) = {
             let i = self.inner.lock().unwrap();
             let app = i.catalog.iter().find(|a| a.key == key).ok_or("This app is no longer in the store.")?;
-            (app.name.clone(), app.versions.get(version).ok_or("This version is no longer offered.")?.url.clone())
+            (app.name.clone(), app.versions.get(version).ok_or("This version is no longer offered.")?.clone())
         };
+        if let Some(source) = store::sources().into_iter().find(|s| s.url == v.source_url) {
+            self.step("Checking LiveContainer's sources");
+            match self.lc_sources().await {
+                Ok(listed) if !listed.iter().any(|u| u.trim_end_matches('/') == source.url.trim_end_matches('/')) => {
+                    self.step("Opening LiveContainer");
+                    open_livecontainer(&format!("livecontainer://source?url={}", install::percent_encode(&source.url)))
+                        .await?;
+                    return Ok(format!("LiveContainer has {} in its Sources now and shows its apps: tap {name} there                                        to install it.", source.name));
+                }
+                Ok(_) => {}
+                Err(e) => logf!("livecontainer: its sources cannot be read ({e}); installing {name} directly"),
+            }
+        }
         self.step("Opening LiveContainer");
-        open_livecontainer(&format!("livecontainer://install?url={}", install::percent_encode(&url))).await?;
+        open_livecontainer(&format!("livecontainer://install?url={}", install::percent_encode(&v.url))).await?;
         Ok(format!("LiveContainer downloads and installs {name}."))
+    }
+
+    /// The AltSources LiveContainer lists (LCAltStoreSourceURLs in its
+    /// preferences, read through house_arrest: a development-signed app's
+    /// container).
+    async fn lc_sources(&self) -> Result<Vec<String>, String> {
+        let s = self.device().await?;
+        let id = services::installed_apps(&s).await?.iter()
+            .filter_map(|d| d.get("CFBundleIdentifier").and_then(plist::Value::as_string).map(str::to_string))
+            .find(|id| id.starts_with("com.kdt.livecontainer"))
+            .or_else(|| install::installed().into_iter()
+                .find(|i| i.kind == install::LIVECONTAINER || i.kind == install::LIVECONTAINER_SIDESTORE).map(|i| i.bundle_id))
+            .ok_or("LiveContainer is not on this iPhone")?;
+        let mut afc = services::app_container(&s, &id, false).await?;
+        let prefs = afc.read_file(&format!("/Library/Preferences/{id}.plist"), 4 << 20).await.unwrap_or_default();
+        if prefs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefs = plist::from_bytes::<plist::Value>(&prefs).map_err(|e| e.to_string())?;
+        Ok(prefs.as_dictionary().and_then(|d| d.get("LCAltStoreSourceURLs")).and_then(plist::Value::as_array)
+            .map(|list| list.iter().filter_map(plist::Value::as_string).map(str::to_string).collect())
+            .unwrap_or_default())
     }
 
     /// Install to LiveContainer, for an added IPA: BariStore hands the file
@@ -1023,13 +1051,6 @@ impl App {
         Ok(format!("LiveContainer received {} and installs it now.", info.name))
     }
 
-    /// Sources › a source › LiveContainer: added to LiveContainer's own
-    /// Sources tab (livecontainer://source?url=, LCAltStoreSourcesView).
-    pub async fn lc_source(&self, url: &str) -> Result<String, String> {
-        open_livecontainer(&format!("livecontainer://source?url={}", install::percent_encode(url))).await?;
-        Ok("LiveContainer adds the source to its Sources.".into())
-    }
-
     /// Whether the release BariStore updates from holds a build other than
     /// this one (My Apps › Updates shows BariStore then).
     pub async fn check_self_update(&self) -> Result<(), String> {
@@ -1049,11 +1070,11 @@ impl App {
         let mut apps: Vec<(String, String)> = install::installed().into_iter().map(|i| (i.bundle_id, i.name)).collect();
         if let Ok(s) = self.device().await {
             if let Ok(list) = services::installed_apps(&s).await {
-                apps = list.iter().filter_map(|d| {
-                    let t = |k: &str| d.get(k).and_then(plist::Value::as_string).unwrap_or("").to_string();
-                    let name = [t("CFBundleDisplayName"), t("CFBundleName")].into_iter().find(|n| !n.is_empty())?;
-                    Some((t("CFBundleIdentifier"), name))
-                }).collect();
+                let on_device = device_list(&list);
+                apps = on_device.iter().filter(|d| d["name"] != "")
+                    .map(|d| (d["bundle_id"].as_str().unwrap_or("").to_string(), d["name"].as_str().unwrap_or("").to_string()))
+                    .collect();
+                self.inner.lock().unwrap().device_apps = on_device;
             }
         }
         let list = label_app_ids(&ids, &apps, &install::installed());
@@ -1177,12 +1198,7 @@ impl App {
 
     pub async fn load_device_apps(&self) -> Result<(), String> {
         let s = self.device().await?;
-        let apps = services::installed_apps(&s).await?;
-        let list: Vec<Json> = apps.iter().map(|d| {
-            let t = |k: &str| d.get(k).and_then(plist::Value::as_string).unwrap_or("").to_string();
-            json!({"bundle_id": t("CFBundleIdentifier"), "name": if t("CFBundleDisplayName").is_empty() { t("CFBundleName") } else { t("CFBundleDisplayName") },
-                   "version": t("CFBundleShortVersionString"), "signer": t("SignerIdentity")})
-        }).collect();
+        let list = device_list(&services::installed_apps(&s).await?);
         self.inner.lock().unwrap().device_apps = list;
         Ok(())
     }
@@ -1293,6 +1309,16 @@ impl App {
             }
         }
     }
+}
+
+/// The iPhone's apps as the page gets them (whoever installed them: the
+/// page finds LiveContainer among them).
+fn device_list(apps: &[plist::Dictionary]) -> Vec<Json> {
+    apps.iter().map(|d| {
+        let t = |k: &str| d.get(k).and_then(plist::Value::as_string).unwrap_or("").to_string();
+        json!({"bundle_id": t("CFBundleIdentifier"), "name": if t("CFBundleDisplayName").is_empty() { t("CFBundleName") } else { t("CFBundleDisplayName") },
+               "version": t("CFBundleShortVersionString"), "signer": t("SignerIdentity")})
+    }).collect()
 }
 
 /// Opens a livecontainer:// URL (through iOS: Minis's browser cannot).

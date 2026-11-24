@@ -15,11 +15,10 @@ use std::time::Duration;
 
 use crate::{logf, state};
 
-/// Icons fit 120 px; screenshots 640 px (Featured's tiles) or 1100 px (an
-/// app's page). The page asks only for these.
+/// Icons fit 120 px, screenshots 1100 px (an app's page; Featured's tiles
+/// show none since 1.1.0). The page asks only for these.
 pub const ICON: u32 = 120;
-pub const TILE: u32 = 640;
-pub const SIZES: [u32; 3] = [ICON, TILE, 1100];
+pub const SIZES: [u32; 2] = [ICON, 1100];
 const MAX_BYTES: usize = 8 << 20;
 /// The cache's size at most: the oldest pictures go first.
 const CAP: u64 = 80 << 20;
@@ -31,14 +30,13 @@ fn path(url: &str, size: u32) -> PathBuf {
 
 /// One icon and two screenshots are decoded at a time (two of the iPhone's
 /// cores; Minis's shell has little memory); icons never wait behind a
-/// screenshot, and `prefetch` takes one screenshot turn at most, so the
-/// page always has one.
+/// screenshot.
 static ICON_TURN: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 static SHOT_TURN: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// A picture being made: who asks for it meanwhile waits for it instead of
 /// making it again (the page and the prefetch after a catalog refresh ask
-/// for the same first screenshots at the same time).
+/// for the same icons at the same time).
 type Making = Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
 static MAKING: std::sync::LazyLock<Making> = std::sync::LazyLock::new(Default::default);
 

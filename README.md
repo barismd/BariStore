@@ -26,7 +26,7 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 - **Fast on the device.** Hashing runs on the processor's SHA instructions and signing uses every core.
 - **Your App IDs under control.** See what uses each one, reuse the App IDs of deleted apps or type your own, keep or drop extensions, ask for Increased Memory Limit (later too: an update keeps it).
 - **Your own app icons.** Pick any picture as an app's icon when you install it, or change it later.
-- **Install into LiveContainer.** Send an app from Featured or an IPA from Files straight into LiveContainer, or give LiveContainer one of your sources.
+- **Install into LiveContainer.** Send an app from Featured or an IPA from Files straight into LiveContainer; an app from one of your sources arrives with its source.
 - **Works with the other tools.** SideStore, AltStore, LiveContainer + SideStore and StikDebug get the pairing file; the stores and LiveContainer get the signing certificate, so they can refresh themselves too.
 
 ## Install

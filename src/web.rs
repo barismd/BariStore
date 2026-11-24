@@ -514,6 +514,8 @@ async fn action(app: &App, r: &Json) -> Json {
                 if let Err(e) = app.device().await {
                     return fail(e);
                 }
+                // What is on the iPhone (whether LiveContainer is, for one).
+                app.load_device_apps().await.ok();
             }
             ok("connected")
         }
@@ -576,7 +578,6 @@ async fn action(app: &App, r: &Json) -> Json {
                            move |a| async move { a.lc_install_local(&path).await });
             ok("started")
         }
-        "lc_source" => match app.lc_source(&s(r, "url")).await { Ok(m) => ok(&m), Err(e) => fail(e) },
         "app_options" => {
             let (id, name) = (s(r, "bundle_id"), s(r, "name"));
             let memory = r.get("increased_memory").and_then(Json::as_bool).unwrap_or(false);
