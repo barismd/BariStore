@@ -17,12 +17,12 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 
 ## Why BariStore
 
-- **No computer, no second device.** Pairing, signing and installing all happen on the iPhone itself.
+- **No computer, no second device.** Pairing, signing and installing all happen on the iPhone or iPad itself.
 - **Developer Mode does not need to have been on.** Pairing makes it appear in Settings; BariStore shows where to tap.
 - **Uses none of your 3 app slots.** It runs inside [Open Minis](https://apps.apple.com/app/id6759188481) and works like an App Store app.
-- **Refresh in seconds.** As SideStore does it, a refresh renews the apps' profiles: nothing is downloaded, signed or uploaded again (apps signed with an older certificate are signed again).
-- **JIT with one tap** for emulators and other JIT apps, the way StikDebug does it.
-- **Sources and updates.** AltStore and SideStore sources, any IPA from Files, one-tap updates, and per-app beta tracks (Off, nightly, alpha…).
+- **Refresh in seconds.** A refresh renews the apps' profiles: nothing is downloaded, signed or uploaded again (apps signed with an older certificate are signed again).
+- **JIT with one tap** for emulators and other JIT apps, right from BariStore.
+- **Sources and updates.** App sources, any IPA from Files, one-tap updates, and per-app beta tracks (Off, nightly, alpha…).
 - **Your App IDs under control.** See what uses each one, reuse the App IDs of deleted apps, keep or drop extensions, ask for Increased Memory Limit.
 - **Works with the other tools.** SideStore, AltStore, LiveContainer + SideStore and StikDebug get the pairing file; the stores and LiveContainer get the signing certificate, so they can refresh themselves too.
 
@@ -49,9 +49,9 @@ something goes wrong.
 
 ## Safe by design
 
-- **Your password never leaves the iPhone** and is never saved: Apple's sign-in turns it into a one-time proof on the device.
+- **Your password never leaves your device** and is never saved: Apple's sign-in turns it into a one-time proof on the device.
 - **There is no BariStore server.** No accounts, no analytics. BariStore talks only to Apple, an anisette server and the sources you add.
-- **The anisette server never sees your Apple ID.** It only supplies device-identity data from a random identifier. Options › Anisette server lets you pick your own.
+- **The anisette server never sees your Apple ID.** It only supplies device-identity data from a random identifier. Options › Anisette server lets you pick one or add your own.
 - **Open source.** BariStore (MIT), Open Minis and the stores it offers (SideStore, LiveContainer, AltStore) are all open source.
 - **Your keys stay with you.** The pairing record, session and signing key are stored privately inside Open Minis.
 

@@ -18,6 +18,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   showed an entry on iOS 27.2.1), Minis does (`minis-bonjour advertise`).
 - Store spec: Featured (search, category chips, a two-column grid of tiles
   with short descriptions and screenshots, Add IPA, Sources with "add" on top;
+  owner, 1.0.1: a tile shows its screenshots whole and upright, side by side
+  (two in an iPhone's tile, three in an iPad's), landscape ones one above the
+  other, a single one on a blurred copy of itself, never a cropped top;
   BariStore picks AltStore, SideStore, LiveContainer+SideStore, LiveContainer,
   stable + nightly, only plain LiveContainer under Recommended (owner,
   2026-11-22); the three stores under a "Stores" category, LiveContainer
@@ -30,8 +33,10 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   tracks; memory only in the app's About; App IDs: a reused App ID shows its
   own name "used by" the app, its extensions' IDs the app's name "created
   under the X App ID"), Options (Apple ID with Certificates: list, revoke,
-  export .p12, and Anisette server: automatic or a custom one, also behind a
-  small gear on setup's Apple ID step; pairing export through the share
+  export .p12, and Anisette server: Automatic, or Select Anisette Server:
+  one of BariStore's servers or one the user adds (plain HTTP only after a
+  "not secure" warning), also behind a small gear on setup's Apple ID step;
+  pairing export through the share
   sheet; info, theme, reset, install defaults: Increased Memory
   Limit, remove extensions). Install sheet: "Extensions too" (reuse free App
   IDs under a reused one) is on offer only when the chosen App ID has as many
@@ -52,6 +57,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
 - No `baristore doctor` command: Options › Log (quick) and Run checks (network,
   tunnel, sign-in probe) in the page.
 - Code, comments, commits, README in English. The owner talks Turkish.
+- README and website (owner, 1.0.1): for iPhone and iPad; say what BariStore
+  does, never "the way SideStore/StikDebug… does it". The page says "iPad"
+  on an iPad (`DEVICE`, BariStore's own messages through `dev()`).
 - Device tests come in **batches** the owner runs; keep their effort low.
 
 ## Facts we rely on (and where they come from)
@@ -110,8 +118,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   memory while signing; signing, packing, RSA key generation and hashing a
   cached IPA run with `block_in_place`; icon and screenshot decoding is
   bounded, one icon and one screenshot at a time; one shared HTTP client
-  (TLS handshakes are slow on the emulated CPU); the first 24 tile
-  screenshots are made ready after each catalog refresh; two tokio workers.
+  (TLS handshakes are slow on the emulated CPU); the first 12 tiles' first
+  two screenshots are made ready after each catalog refresh; two tokio
+  workers.
   The page shows Featured 12 tiles at a time (the next 12 as the end comes
   near, the first 12 again on a new category or search) and loads pictures
   3 at a time, those near the screen first, each with a spinner until it is
@@ -171,7 +180,15 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   directory with range requests: first `bytes=0-0` for the size, because
   GitHub's release storage answers suffix ranges (`bytes=-N`) with 501.
 - Anisette server choice: settings.json `anisette` ("" = automatic); a chosen
-  server is the only one sign-in uses, checked (/v3/client_info) when saved.
+  server is the only one sign-in uses, checked (/v3/client_info) when picked
+  or added (a pick is saved at once, no Save button); the user's own servers
+  are `anisette_servers` (one chosen in 1.0.0 counts as added).
+- Add IPA (owner, 1.0.1: on an iPad a 150 MB IPA showed nothing at all): the
+  file input stays in the page until it answers (iOS can drop a detached one
+  and its change event while it copies a big file out of Files); a sheet
+  shows from the tap ("cancel" closes it), then MB sent, time left and
+  "Reading the app…", with Cancel. The server reads the body in 4 MiB pieces
+  and writes each with `block_in_place`.
 - Signing speed (owner: a 140 MB app took very long): the IPA is unpacked
   and hashed on up to four threads, page hashes are reused across the
   signature-size rounds and computed on several threads, and the final check
@@ -236,6 +253,10 @@ against a mock device, CSR and PKCS#12 with openssl (3.x and 1.1.1), signatures
 with rcodesign. **Device-verified (owner):** LocalDevVPN check, pairing (0.1.0); Apple sign-in
 with 2FA, signing and installing an app (0.10.0-alpha.3).
 Everything else: say "untested on device" until the owner confirms.
+Linux-verified for 1.0.1: the page in Playwright against a mock server (tile
+strips at 375/390/820 px with portrait, landscape, single and mixed
+screenshots, Add IPA picking/cancel/upload/cancel, the Anisette sheet), the
+upload endpoint with a 150 MB IPA (byte-identical, 1.1 s on Linux).
 Linux-verified for 1.0.0: the page in Playwright against a mock server (Updates
 sheet, Check, Beta updates, Extensions too, anisette sheet and gear, App ID
 labels), the zip-directory count on LiveContainer's real IPA (3 extensions).

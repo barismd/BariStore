@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>BariStore · an app store for iPhone, no computer needed</title>
+<title>BariStore · an app store for iPhone and iPad, no computer needed</title>
 <meta name="description" content="Install and refresh sideloaded apps on your iPhone or iPad with a free Apple ID. No computer, no second device. Runs in Open Minis.">
 <meta property="og:title" content="BariStore">
 <meta property="og:description" content="An app store for iPhone and iPad that needs no computer. Free Apple ID, quick refresh, JIT, open source.">
@@ -98,7 +98,8 @@ details { background: var(--card); border-radius: 14px; padding: 14px 16px; box-
 details + details { margin-top: 10px; }
 summary { font-weight: 650; cursor: pointer; }
 details p { color: var(--muted); font-size: 15px; margin-top: 8px; }
-footer { padding: 56px 0 calc(32px + env(safe-area-inset-bottom)); color: var(--muted); font-size: 14px; text-align: center; }
+footer { margin-top: 72px; padding: 28px 0 calc(36px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 14px; line-height: 1.7; text-align: center; }
 
 @media (max-width: 820px) {
   .hero-grid { grid-template-columns: 1fr; padding-top: 28px; }
@@ -124,7 +125,7 @@ footer { padding: 56px 0 calc(32px + env(safe-area-inset-bottom)); color: var(--
       <a href="https://github.com/barismd/BariStore">GitHub</a></nav>
     <div class="hero-grid">
       <div>
-        <h1>An app store for your iPhone.<br>No computer needed.</h1>
+        <h1>An app store for iPhone and iPad.<br>No computer needed.</h1>
         <p class="sub">Install, refresh and update sideloaded apps with a free Apple ID, right on the iPhone or iPad you hold.</p>
         <div class="cta">
           <a class="btn" href="#install">Install BariStore</a>
@@ -143,20 +144,20 @@ footer { padding: 56px 0 calc(32px + env(safe-area-inset-bottom)); color: var(--
 
   <section>
     <h2>Everything on one device</h2>
-    <p class="lead">BariStore pairs with the iPhone it runs on, signs apps there and installs them there. Nothing else to buy, plug in or keep running.</p>
+    <p class="lead">BariStore pairs with the iPhone or iPad it runs on, signs apps there and installs them there. Nothing else to buy, plug in or keep running.</p>
     <div class="grid">
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M11 18.5h2"/></svg></div>
-        <h3>No computer, no second device</h3><p>Pairing, signing and installing all happen on the iPhone itself.</p></div>
+        <h3>No computer, no second device</h3><p>Pairing, signing and installing all happen on the iPhone or iPad itself.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M4.2 7.5l2.6 1.5M17.2 15l2.6 1.5M4.2 16.5l2.6-1.5M17.2 9l2.6-1.5"/><circle cx="12" cy="12" r="3.5"/></svg></div>
         <h3>No Developer Mode beforehand</h3><p>It does not need to have been on before: pairing makes it appear in Settings, and BariStore shows where to tap.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><path d="M17 14v6M14 17h6"/></svg></div>
         <h3>Uses none of your 3 app slots</h3><p>BariStore runs inside Open Minis, so all three free-account slots stay yours. It looks and works like an App Store app.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg></div>
-        <h3>Refresh in seconds</h3><p>Like SideStore, a refresh only renews the apps' profiles: nothing is downloaded, signed or uploaded again.</p></div>
+        <h3>Refresh in seconds</h3><p>A refresh only renews the apps' profiles: nothing is downloaded, signed or uploaded again.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
-        <h3>JIT with one tap</h3><p>Open emulators and other JIT apps with JIT on, the way StikDebug does, without another app.</p></div>
+        <h3>JIT with one tap</h3><p>Open emulators and other JIT apps with JIT on, right from BariStore, without another app.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg></div>
-        <h3>Sources, updates, beta tracks</h3><p>AltStore and SideStore sources, any IPA from Files, one-tap updates and an opt-in for nightly or alpha builds per app.</p></div>
+        <h3>Sources, updates, beta tracks</h3><p>App sources, any IPA from Files, one-tap updates and an opt-in for nightly or alpha builds per app.</p></div>
     </div>
   </section>
 
@@ -195,7 +196,7 @@ footer { padding: 56px 0 calc(32px + env(safe-area-inset-bottom)); color: var(--
       <div>
         <h2>Safe by design</h2>
         <ul class="checks">
-          <li><b>Your password never leaves the iPhone</b> and is never saved: Apple's sign-in turns it into a one-time proof on the device.</li>
+          <li><b>Your password never leaves your device</b> and is never saved: Apple's sign-in turns it into a one-time proof on the device.</li>
           <li><b>No BariStore server.</b> No accounts, no analytics. BariStore talks only to Apple, an anisette server and the sources you add.</li>
           <li><b>The anisette server never sees your Apple ID.</b> It only supplies device-identity data; you can choose your own.</li>
           <li><b>Open source.</b> BariStore (MIT), Open Minis and the stores it offers (SideStore, LiveContainer, AltStore) are all open source.</li>
@@ -218,9 +219,9 @@ footer { padding: 56px 0 calc(32px + env(safe-area-inset-bottom)); color: var(--
 
 </main>
 
-<footer class="wrap">
-  BariStore · MIT licence · <a href="https://github.com/barismd/BariStore">github.com/barismd/BariStore</a><br>
-  Not affiliated with Apple. Apps are downloaded from their publishers when you install them.
+<footer>
+  <div class="wrap">BariStore · MIT licence · <a href="https://github.com/barismd/BariStore">github.com/barismd/BariStore</a><br>
+  Not affiliated with Apple. Apps are downloaded from their publishers when you install them.</div>
 </footer>
 
 <script>

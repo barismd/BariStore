@@ -129,7 +129,7 @@ textarea.log { width: 100%; height: 300px; font: 12px/1.35 ui-monospace, Menlo, 
 details summary { color: var(--accent); font-weight: 600; padding: 12px 0; cursor: pointer; }
 .toast { position: fixed; left: 50%; bottom: calc(90px + env(safe-area-inset-bottom)); transform: translateX(-50%);
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 14px; z-index: 30;
-  max-width: calc(100% - 32px); box-shadow: 0 6px 20px rgba(0,0,0,.25); animation: fade .2s; }
+  width: max-content; max-width: calc(100% - 32px); box-shadow: 0 6px 20px rgba(0,0,0,.25); animation: fade .2s; }
 a { color: var(--accent); }
 /* Featured: categories, a two-column grid of tiles, screenshots. */
 .cats { display: flex; gap: 8px; overflow-x: auto; margin: 12px -16px 0; padding: 0 16px 2px; scrollbar-width: none; }
@@ -139,9 +139,23 @@ a { color: var(--accent); }
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
 /* Tiles off screen are neither laid out nor painted (long catalogs). */
 .tile { background: var(--card); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; display: flex;
-  flex-direction: column; cursor: pointer; min-width: 0; }
-.tile .shot { height: 150px; background: var(--chip); overflow: hidden; position: relative; }
-.tile .shot img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
+  flex-direction: column; cursor: pointer; min-width: 0; container-type: inline-size; }
+/* A tile's screenshots, whole and upright, side by side: two in an iPhone's tile, three in an iPad's wider one.
+   Landscape ones (games) go one above the other; a single one sits on a blurred copy of itself. */
+.strip { --h: min(calc((100cqw - 22px) / .93), 200px); position: relative; display: flex; justify-content: center; gap: 6px;
+  height: calc(var(--h) + 16px); padding: 8px; background: var(--chip); overflow: hidden; }
+.strip .pic { position: relative; flex: none; width: calc(var(--h) * .462); height: var(--h); display: flex;
+  align-items: center; justify-content: center; }
+.strip .pic:nth-child(n+3) { display: none; }
+@container (min-width: 300px) { .strip .pic:nth-child(3) { display: flex; } }
+.strip img { display: block; max-width: 100%; max-height: 100%; min-width: 1px; min-height: 1px; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+.strip.wide { flex-direction: column; align-items: stretch; }
+.strip.wide .pic { width: auto; height: calc((var(--h) - 6px) / 2); }
+.strip.wide .pic:nth-child(n+3) { display: none; }
+.strip.one .pic { width: 100%; height: var(--h); }
+.strip.one::before { content: ""; position: absolute; inset: -24px; background: var(--shot, none) center / cover;
+  filter: blur(18px) saturate(1.3); opacity: .55; }
 /* Pictures fade in once loaded instead of popping in line by line; a spinner turns until then. */
 img.fade { opacity: 0; transition: opacity .25s ease-out; }
 img.fade.ok { opacity: 1; }
@@ -163,6 +177,8 @@ img.fade.ok { opacity: 1; }
 .shots .pic { position: relative; flex: none; height: 380px; min-width: 175px; max-width: 85%; border-radius: 16px; background: var(--chip);
   overflow: hidden; scroll-snap-align: start; }
 .shots img { height: 100%; max-width: 100%; display: block; object-fit: contain; }
+@media (min-width: 700px) { .shots .pic { height: min(520px, 62vh); } }
+input.picker { position: fixed; left: -9999px; top: 0; opacity: 0; }
 .badge { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
   background: var(--bad); color: #fff; font-size: 11px; font-weight: 700; margin-left: 5px; vertical-align: 1px; }
 .gear { width: 30px; height: 30px; border-radius: 50%; background: var(--chip); color: var(--muted); display: grid; place-items: center; flex: none; }
@@ -181,6 +197,11 @@ const T = location.pathname.replace(/\/$/, "");
 let S = null, C = { apps: [], sources: [], suggested: [], refreshing: false };
 let tab = "featured", query = "", detail = null, sheet = null;
 const $ = (s) => document.querySelector(s);
+/** "iPad" on an iPad (its web view says Macintosh, but has touch), else "iPhone": the page's words follow the
+ *  device, BariStore's messages too (dev). */
+const DEVICE = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
+  ? "iPad" : "iPhone";
+const dev = (text) => String(text ?? "").replace(/\biPhone\b/g, DEVICE);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 /** fetch with a deadline: a server that hangs must not leave the page waiting forever. */
@@ -206,7 +227,7 @@ async function act(action, extra = {}) {
 }
 function toast(msg) {
   document.querySelectorAll(".toast").forEach((t) => t.remove());
-  const t = document.createElement("div"); t.className = "toast"; t.textContent = msg;
+  const t = document.createElement("div"); t.className = "toast"; t.textContent = dev(msg);
   document.body.appendChild(t); setTimeout(() => t.remove(), 3200);
 }
 
@@ -243,11 +264,12 @@ function pumpPics() {
     const done = (ok) => {
       if (finished) return;
       finished = true; picsLoading--;
-      const box = img.parentNode;
+      const box = img.parentNode, strip = box?.parentNode;
       if (box) box.classList.remove("loading");
       if (ok) img.classList.add("ok");
       else if (img.dataset.drop && box) box.remove();
       else img.remove();
+      if (strip?.classList.contains("strip")) { if (strip.children.length) placeShot(strip); else strip.remove(); }
       pumpPics();
     };
     img.onload = () => done(true);
@@ -255,6 +277,18 @@ function pumpPics() {
     setTimeout(() => done(img.complete && img.naturalWidth > 0), 30000);
     img.src = img.dataset.src;
   }
+}
+/** A tile's strip follows its first screenshot: landscape ones go one above the other. Screenshots of the other
+ *  shape leave (the next one takes their place), and a single one left gets a blurred copy of itself behind it. */
+function placeShot(strip) {
+  const first = strip.firstElementChild.querySelector("img.ok");
+  if (!first) return;
+  const wide = first.naturalWidth > first.naturalHeight;
+  strip.classList.toggle("wide", wide);
+  strip.querySelectorAll("img.ok").forEach((img) => {
+    if (img !== first && img.naturalWidth > img.naturalHeight !== wide) img.parentNode.remove();
+  });
+  if (strip.children.length === 1) { strip.classList.add("one"); strip.style.setProperty("--shot", `url("${first.src}")`); }
 }
 /** Hands the new pictures in `root` to the loader, and watches Featured's "more" row. */
 function hydrate(root) {
@@ -309,7 +343,7 @@ function pairingHow() {
     <li>Open <b>Settings › Privacy & Security › Developer Mode</b>. It is there now, even if it was not before.</li>
     <li>At the bottom, tap <b>Pair with BariStore</b> and enter your passcode.</li>
     <li>Type the 6-digit code from the notification.</li>
-    <li>If Developer Mode is off, turn it on there (the iPhone restarts).</li></ol>`;
+    <li>If Developer Mode is off, turn it on there (the ${DEVICE} restarts).</li></ol>`;
 }
 
 function setupView() {
@@ -320,27 +354,27 @@ function setupView() {
   const other = S.vpn_message && !S.vpn_message.startsWith("No connection");
   const s1 = st.vpn == null ? `Checking LocalDevVPN…`
     : `Connect <b>LocalDevVPN</b> (App Store) on Wi-Fi. BariStore continues by itself.
-     ${other ? `<div class="notice bad">${esc(S.vpn_message)}</div>` : ""}
+     ${other ? `<div class="notice bad">${esc(dev(S.vpn_message))}</div>` : ""}
      <button class="btn secondary" onclick="check()">Check again</button>`;
   const s2 = `Settings shows where to tap once you start.
      <button class="btn" onclick="act('pair')">Start pairing</button>`;
   const s3 = `<div style="display:flex;gap:10px;align-items:flex-start"><div class="grow">Sign in with your Apple ID. A free one is enough.</div>
        <button class="gear" onclick="openAnisette()" aria-label="Anisette server">${GEAR}</button></div>
-     ${st.devmode === false ? `<div class="notice">Developer Mode is off: turn it on in Settings › Privacy & Security › Developer Mode (the iPhone restarts).</div>` : ""}
+     ${st.devmode === false ? `<div class="notice">Developer Mode is off: turn it on in Settings › Privacy & Security › Developer Mode (the ${DEVICE} restarts).</div>` : ""}
      <input class="field" id="email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Apple ID email" value="${esc(st.email)}">
      <input class="field" id="password" type="password" autocomplete="current-password" placeholder="Password">
      <button class="btn" onclick="login()">Sign in</button>
-     <div class="small muted" style="margin-top:10px">Your password stays on this iPhone and is never saved.</div>`;
+     <div class="small muted" style="margin-top:10px">Your password stays on this ${DEVICE} and is never saved.</div>`;
   return `<div class="wrap">
-    <header class="top"><img src="logo.svg" alt=""><div><div style="font-weight:700;font-size:20px">BariStore</div><div class="muted small">Set up this iPhone</div></div></header>
+    <header class="top"><img src="logo.svg" alt=""><div><div style="font-weight:700;font-size:20px">BariStore</div><div class="muted small">Set up this ${DEVICE}</div></div></header>
     <div class="card pad"><ol class="steps">
       ${li(1, "Wi-Fi and LocalDevVPN", s1)}
-      ${li(2, "Pair this iPhone", s2)}
+      ${li(2, `Pair this ${DEVICE}`, s2)}
       ${li(3, "Apple ID", s3)}
       ${li(4, "Done", `<button class="btn" onclick="act('settings',{settings:{setup_done:true}})">Open the store</button>`)}
     </ol></div>
-    ${paired ? `<div class="small muted" style="text-align:center">Paired with ${esc(st.device_name || "this iPhone")}</div>` : ""}
-    <button class="link bad" style="text-align:center" onclick="ask({title:'Start again?', message:'BariStore forgets the pairing, the Apple ID session and its settings, and setup starts from the beginning. Apps stay on the iPhone.', ok:'Start again', danger:true, run:reset})">Start again</button>
+    ${paired ? `<div class="small muted" style="text-align:center">Paired with ${esc(st.device_name || "this " + DEVICE)}</div>` : ""}
+    <button class="link bad" style="text-align:center" onclick="ask({title:'Start again?', message:'BariStore forgets the pairing, the Apple ID session and its settings, and setup starts from the beginning. Apps stay on the ${DEVICE}.', ok:'Start again', danger:true, run:reset})">Start again</button>
   </div>`;
 }
 async function check() { const r = await act("check"); S.vpn_message = r.ok ? "" : r.message; render(); }
@@ -380,10 +414,10 @@ function getButton(a) {
   return `<button class="pill" data-key="${esc(a.key)}" onclick="event.stopPropagation();openApp(this.dataset.key)">${isInstalled(a) ? "VIEW" : "GET"}</button>`;
 }
 function tile(a) {
-  const shot = (a.screenshots || [])[0];
+  const shots = (a.screenshots || []).slice(0, 3);
   const text = shortText(a);
   return `<div class="tile" data-key="${esc(a.key)}" onclick="openApp(this.dataset.key)">
-    ${shot ? `<div class="shot loading">${pic(shotUrl(shot, 640), true)}</div>` : ""}
+    ${shots.length ? `<div class="strip${shots.length === 1 ? " one" : ""}">${shots.map((u) => `<div class="pic loading">${pic(shotUrl(u, 640), true)}</div>`).join("")}</div>` : ""}
     <div class="body"><div class="head">${iconHtml(a)}<div class="grow"><div class="ell" style="font-weight:600">${esc(a.name)}</div>
       <div class="ell muted small">${esc(a.developer || versionsLabel(a))}</div></div></div>
       ${text ? `<div class="desc">${esc(text)}</div>` : ""}${getButton(a)}</div></div>`;
@@ -527,7 +561,7 @@ function installOptionsHtml() {
   return `<h2>Options</h2>
     <div class="card">
       ${toggleRow("opt:remove_extensions", "Remove extensions", "Uses fewer App IDs (a free Apple ID has 10). Widgets and share sheets of this app stop working.", opts.remove_extensions)}
-      ${toggleRow("opt:increased_memory", "Increased Memory Limit", "More memory for emulators and LiveContainer, where the iPhone supports it.", opts.increased_memory)}
+      ${toggleRow("opt:increased_memory", "Increased Memory Limit", `More memory for emulators and LiveContainer, where the ${DEVICE} supports it.`, opts.increased_memory)}
     </div>
     ${appIds ? `<h2>App ID</h2>${appIds}` : ""}`;
 }
@@ -568,18 +602,40 @@ function install() {
 }
 
 // ---------------------------------------------------------------- add IPA
+/** Files' picker. Its input stays in the page until it answers: iOS can drop a detached one, and its change
+ *  event with it, while it copies a big file out of Files. A sheet says what is going on meanwhile. */
 function pickIpa() {
+  document.querySelectorAll("input.picker").forEach((i) => i.remove());
   const input = document.createElement("input");
-  input.type = "file"; input.accept = ".ipa,application/octet-stream";
-  input.onchange = () => { if (input.files[0]) uploadIpa(input.files[0]); };
+  input.type = "file"; input.accept = ".ipa,application/octet-stream"; input.className = "picker";
+  document.body.appendChild(input);
+  const waiting = () => sheet?.kind === "picking" && sheet.input === input;
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    input.remove();
+    if (file && waiting()) uploadIpa(file); else if (waiting()) closeSheet();
+  });
+  input.addEventListener("cancel", () => { input.remove(); if (waiting()) closeSheet(); });
+  openSheet({ kind: "picking", input });
   input.click();
 }
+function pickingSheet() {
+  return {
+    title: "Add IPA",
+    body: `<p>Choose an .ipa file.</p><div class="bar indet"><i></i></div>
+      <p class="muted small">A big app takes a moment to open: iOS copies it out of Files for BariStore first.</p>`,
+    foot: `<button class="btn secondary" onclick="closeSheet()">Cancel</button>`,
+  };
+}
+/** Sends the file to BariStore, which keeps it on disk and reads the app inside. */
 function uploadIpa(file) {
   const xhr = new XMLHttpRequest();
-  xhr.open("POST", T + "/api/upload");
-  openSheet({ kind: "upload", name: file.name, pct: 0 });
-  xhr.upload.onprogress = (e) => { if (e.lengthComputable && sheet?.kind === "upload") { sheet.pct = Math.round(e.loaded * 100 / e.total); renderSheet(); } };
+  openSheet({ kind: "upload", name: file.name, size: file.size, sent: 0, reading: false, started: Date.now(), xhr });
+  const mine = () => sheet?.kind === "upload" && sheet.xhr === xhr;
+  xhr.upload.onprogress = (e) => { if (mine()) { sheet.sent = e.loaded; renderSheet(); } };
+  xhr.upload.onload = () => { if (mine()) { sheet.reading = true; renderSheet(); } };
   xhr.onload = () => {
+    if (!mine()) return;
     let r = {};
     try { r = JSON.parse(xhr.responseText); } catch (e) { r = { ok: false, message: "BariStore did not answer." }; }
     if (!r.ok) { closeSheet(); toast(r.message); return; }
@@ -588,9 +644,26 @@ function uploadIpa(file) {
     openSheet({ kind: "local", ipa: r });
     loadAppIds(true);
   };
-  xhr.onerror = () => { closeSheet(); toast("The upload failed."); };
+  xhr.onerror = () => { if (mine()) { closeSheet(); toast("The upload failed."); } };
+  xhr.open("POST", T + "/api/upload");
   xhr.send(file);
 }
+function uploadSheet() {
+  const mb = (n) => (n / 1e6).toFixed(n < 1e7 ? 1 : 0);
+  const pct = sheet.size ? Math.min(100, Math.floor(sheet.sent * 100 / sheet.size)) : 0;
+  const secs = (Date.now() - sheet.started) / 1000;
+  const left = sheet.sent && secs > 2 ? Math.ceil((sheet.size - sheet.sent) / (sheet.sent / secs)) : 0;
+  const eta = left > 3 ? ` · about ${left < 90 ? left + " s" : Math.round(left / 60) + " min"} left` : "";
+  return {
+    title: "Adding IPA",
+    body: `<p class="ell" style="font-weight:600">${esc(sheet.name)}</p>
+      ${sheet.reading ? `<div class="bar indet"><i></i></div><p class="muted small">Received. Reading the app…</p>`
+        : `<div class="bar"><i style="width:${pct}%"></i></div>
+           <p class="muted small">${sheet.sent ? `${mb(sheet.sent)} of ${mb(sheet.size)} MB${eta}` : `Sending ${mb(sheet.size)} MB to BariStore…`}</p>`}`,
+    foot: `<button class="btn secondary" onclick="cancelUpload()">Cancel</button>`,
+  };
+}
+function cancelUpload() { const xhr = sheet?.xhr; closeSheet(); xhr?.abort(); }
 function localSheet(ipa) {
   return {
     title: ipa.name,
@@ -708,7 +781,7 @@ async function setChannel(id, channel) {
   if (!r.ok) toast(r.message);
 }
 function deleteApp(id, name) {
-  ask({ title: `Delete ${name}?`, message: "It is removed from this iPhone with its data.", ok: "Delete", danger: true,
+  ask({ title: `Delete ${name}?`, message: `It is removed from this ${DEVICE} with its data.`, ok: "Delete", danger: true,
     run: () => act("delete", { bundle_id: id, name }) });
 }
 
@@ -745,45 +818,99 @@ function optionsView() {
       <div class="row"><button class="link" onclick="act('update')">Update BariStore</button></div>
       <div class="row"><button class="link" onclick="showLog()">Log</button></div>
       <div class="row"><button class="link" onclick="ask({title:'Clear the cache?', message:'Deletes downloaded apps, icons and the copy of the catalog. Apps from the store are downloaded again when they are refreshed.', ok:'Clear cache', run:clearCache})">Clear cache${cacheBytes != null ? ` <span class="muted small">(${Math.round(cacheBytes / 1e6)} MB)</span>` : ""}</button></div>
-      <div class="row"><button class="link bad" onclick="ask({title:'Reset BariStore?', message:'BariStore forgets the Apple ID session, the pairing, sources, settings and its app list, and starts setup again. Apps stay on the iPhone.', ok:'Reset', danger:true, run:reset})">Reset BariStore</button></div>
+      <div class="row"><button class="link bad" onclick="ask({title:'Reset BariStore?', message:'BariStore forgets the Apple ID session, the pairing, sources, settings and its app list, and starts setup again. Apps stay on the ${DEVICE}.', ok:'Reset', danger:true, run:reset})">Reset BariStore</button></div>
       <div class="row"><button class="link bad" onclick="quit()">Quit BariStore</button></div>
     </div>
     <p class="small muted" style="text-align:center">MIT licence. No accounts, no analytics: BariStore talks only to Apple, the anisette server and the sources you add.</p>
   </div>`;
 }
-/** Options › Anisette server (also the gear on setup's Apple ID step). */
+/** Options › Anisette server (also the gear on setup's Apple ID step): Automatic, or one server kept, picked
+ *  from BariStore's or added by the user. A pick is checked and saved at once. */
 function openAnisette() {
-  const url = S.settings.anisette || "";
-  openSheet({ kind: "anisette", custom: !!url, url, error: "", saving: false });
+  openSheet({ kind: "anisette", mode: S.settings.anisette ? "select" : "auto", adding: "", http: false, busy: "", error: "", errorAt: "" });
+}
+/** The user's own servers (and one chosen before BariStore kept a list of them). */
+function anisetteAdded() {
+  const chosen = S.settings.anisette || "", list = [...(S.settings.anisette_servers || [])];
+  if (chosen && !(S.anisette_defaults || []).includes(chosen) && !list.includes(chosen)) list.push(chosen);
+  return list;
 }
 function anisetteSheet() {
-  const choice = (custom, title, note) => `<div class="choice ${sheet.custom === custom ? "on" : ""}" onclick="sheet.custom=${custom};renderSheet()">
-      <div class="radio"></div><div class="grow"><div style="font-weight:600">${title}</div><div class="muted small">${note}</div></div></div>`;
+  const chosen = S.settings.anisette || "", select = sheet.mode === "select";
+  const error = (at) => sheet.error && sheet.errorAt === at ? `<div class="notice bad">${esc(sheet.error)}</div>` : "";
+  const row = (url, own) => {
+    const http = url.startsWith("http://");
+    const note = sheet.busy === url ? "Checking the server…" : own ? (http ? "Added by you · not secure (HTTP)" : "Added by you") : "BariStore's";
+    return `<div class="choice ${chosen === url ? "on" : ""}" data-url="${esc(url)}" onclick="chooseAnisette(this.dataset.url)">
+      <div class="radio"></div><div class="grow"><div class="ell" style="font-weight:600">${esc(url.replace(/^https?:\/\//, ""))}</div>
+      <div class="small ${http && own ? "note" : "muted"}" style="margin:0">${note}</div></div>
+      ${own ? `<button class="pill quiet" data-url="${esc(url)}" onclick="event.stopPropagation();removeAnisette(this.dataset.url)">Remove</button>` : ""}</div>`;
+  };
+  const added = anisetteAdded();
   return {
     title: "Anisette server",
     body: `<p class="muted small">Apple asks for device-identity data (anisette) at sign-in. A server makes it from a random identifier: it never sees your Apple ID or password.</p>
-      ${choice(false, "Automatic", "Tries the public servers in turn until Apple accepts one.")}
-      ${choice(true, "Custom server", "One you trust or run yourself (anisette v3).")}
-      ${sheet.custom ? `<input class="field" id="anisette" type="url" autocapitalize="none" spellcheck="false" placeholder="https://ani.example.com" value="${esc(sheet.url)}" oninput="sheet.url=this.value">` : ""}
-      ${sheet.error ? `<div class="notice bad">${esc(sheet.error)}</div>` : ""}
+      <div class="seg"><button class="${select ? "" : "on"}" onclick="anisetteMode('auto')">Automatic</button>
+        <button class="${select ? "on" : ""}" onclick="anisetteMode('select')">Select Anisette Server</button></div>
+      ${!select ? `<p class="muted small">BariStore tries its servers in turn until Apple accepts one.</p>${error("mode")}` : `
+        ${chosen ? "" : `<p class="muted small">Pick one. Until then BariStore stays on Automatic.</p>`}
+        <h2>BariStore's servers</h2>${(S.anisette_defaults || []).map((u) => row(u, false)).join("")}
+        ${added.length ? `<h2>Your servers</h2>${added.map((u) => row(u, true)).join("")}` : ""}
+        ${error("pick")}
+        <h2>Add your own</h2>
+        <input class="field" id="anisette" type="url" autocapitalize="none" spellcheck="false" placeholder="https://ani.example.com"
+          value="${esc(sheet.adding)}" oninput="sheet.adding=this.value">
+        ${sheet.http ? `<div class="notice">This address uses HTTP, which is not secure: anyone on the network can read and change what the server sends. Use https:// if the server offers it.
+          <button class="btn danger" onclick="addAnisette(true)">Add anyway</button></div>` : ""}
+        ${error("add")}
+        <button class="btn secondary" ${sheet.busy ? "disabled" : ""} onclick="addAnisette(false)">${sheet.busy === "add" ? "Checking the server…" : "Add server"}</button>`}
       ${S.setup.signed_in ? `<p class="small muted">Used from the next sign-in.</p>` : ""}`,
-    foot: `<button class="btn" ${sheet.saving ? "disabled" : ""} onclick="saveAnisette()">${sheet.saving ? "Checking the server…" : "Save"}</button>`,
   };
 }
-async function saveAnisette() {
-  const url = sheet.custom ? ($("#anisette")?.value || "").trim() : "";
-  if (sheet.custom && !url) { sheet.error = "Enter the server's address."; renderSheet(); return; }
-  sheet.saving = true; sheet.error = ""; renderSheet();
+/** Automatic is saved at once; Select shows the servers, and the setting changes with the first pick. */
+async function anisetteMode(mode) {
+  sheet.mode = mode; sheet.error = "";
+  renderSheet();
+  if (mode !== "auto" || !S.settings.anisette) return;
+  const r = await act("anisette", { url: "" });
+  if (sheet?.kind !== "anisette") return;
+  if (r.ok) toast(r.message); else { sheet.error = r.message; sheet.errorAt = "mode"; renderSheet(); }
+}
+async function chooseAnisette(url) {
+  if (sheet.busy || url === S.settings.anisette) return;
+  sheet.busy = url; sheet.error = ""; renderSheet();
   const r = await act("anisette", { url });
   if (sheet?.kind !== "anisette") return;
-  if (r.ok) { closeSheet(); toast(r.message); } else { sheet.saving = false; sheet.error = r.message; renderSheet(); }
+  sheet.busy = "";
+  if (r.ok) toast(r.message); else { sheet.error = r.message; sheet.errorAt = "pick"; }
+  renderSheet();
+}
+/** A server of the user's own: checked, kept and chosen. Plain HTTP only after a warning. */
+async function addAnisette(anyway) {
+  document.activeElement?.blur();
+  const url = ($("#anisette")?.value || sheet.adding || "").trim();
+  sheet.adding = url; sheet.error = "";
+  if (!/^https?:\/\/[^\s\/]+/i.test(url)) {
+    sheet.http = false; sheet.error = "Enter the server's address, starting with https://"; sheet.errorAt = "add"; renderSheet(); return;
+  }
+  if (/^http:\/\//i.test(url) && !anyway) { sheet.http = true; renderSheet(); return; }
+  sheet.http = false; sheet.busy = "add"; renderSheet();
+  const r = await act("anisette_add", { url });
+  if (sheet?.kind !== "anisette") return;
+  sheet.busy = "";
+  if (r.ok) { sheet.adding = ""; toast(r.message); } else { sheet.error = r.message; sheet.errorAt = "add"; }
+  renderSheet();
+}
+function removeAnisette(url) {
+  if (sheet.busy) return;
+  act("anisette_remove", { url }).then(() => { if (sheet?.kind === "anisette") renderSheet(); });
 }
 function setTheme(t) { applyTheme(t); S.settings.theme = t; render(); act("settings", { settings: { theme: t } }); }
 async function exportPairing() {
   const r = await act("export_pairing");
   if (!r.ok) { toast(r.message); return; }
   openSheet({ kind: "share", file: r.file, title: "Pairing file",
-    note: "SideStore, StikDebug and other tools use this file to reach this iPhone. Keep it private." });
+    note: `SideStore, StikDebug and other tools use this file to reach this ${DEVICE}. Keep it private.` });
 }
 /** The share sheet for a file from BariStore (Save to Files, AirDrop, another app). Called
  *  straight from a tap: iOS shows the sheet only during one. */
@@ -857,9 +984,9 @@ function taskSheet(task) {
   const code = S.pairing_code;
   const pairing = S.pairing_waiting && !task.done;
   return {
-    title: task.title, closable: task.done,
+    title: dev(task.title), closable: task.done,
     body: `${code && !task.done ? `<div class="muted small" style="text-align:center;margin-top:12px">Pairing code</div><div class="code">${esc(code.slice(0, 3))} ${esc(code.slice(3))}</div>` : ""}
-      ${task.error ? `<div class="notice bad" style="white-space:pre-wrap">${esc(task.error)}</div>` : `<p>${esc(task.step || "Working…")}</p>`}
+      ${task.error ? `<div class="notice bad" style="white-space:pre-wrap">${esc(dev(task.error))}</div>` : `<p>${esc(dev(task.step || "Working…"))}</p>`}
       ${task.done && task.next?.share?.password ? `<div class="secret">${esc(task.next.share.password)}</div>` : ""}
       ${task.done ? "" : `<div class="bar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 35}%"></i></div>`}
       ${pairing && !code ? pairingHow() : ""}`,
@@ -877,7 +1004,7 @@ function questionSheet(q) {
        <button class="btn" onclick="answer(${q.id}, $('#answer').value)">Continue</button>
        ${(q.options || []).includes("sms") ? `<button class="btn secondary" onclick="answer(${q.id}, 'sms')">No code? Send a text message</button>` : ""}
        <button class="btn secondary" onclick="answer(${q.id}, null)">Cancel</button>`;
-  return { title: q.title, body: `<p class="muted">${esc(q.message)}</p>${body}` };
+  return { title: dev(q.title), body: `<p class="muted">${esc(dev(q.message))}</p>${body}` };
 }
 function sheetParts() {
   const q = S?.question, task = S?.task;
@@ -897,8 +1024,8 @@ function sheetParts() {
     case "log": return { key: "log", closable: true, title: "Log",
       body: `<p class="muted small">No password, token or key is in here.</p><textarea class="log" readonly>${esc(sheet.text)}</textarea>`,
       foot: `<button class="btn" onclick="copyLog()">Copy</button><button class="btn secondary" onclick="showLog(true)">Run checks</button>` };
-    case "upload": return { key: "upload", title: "Adding IPA",
-      body: `<p class="ell">${esc(sheet.name)}</p><div class="bar"><i style="width:${sheet.pct}%"></i></div><p class="muted small">${sheet.pct}%</p>` };
+    case "picking": return { key: "picking", closable: true, ...pickingSheet() };
+    case "upload": return { key: "upload", ...uploadSheet() };
     case "local": return { key: "local", closable: true, ...localSheet(sheet.ipa) };
     case "certs": return { key: "certs", closable: true, ...certsSheet() };
     case "share": return { key: "share", closable: true, title: sheet.title, body: `<p class="muted">${esc(sheet.note)}</p>`,

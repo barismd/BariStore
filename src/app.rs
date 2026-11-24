@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
-use crate::apple::{gsa, portal};
+use crate::apple::{anisette, gsa, portal};
 use crate::device::{services, session::{self, Session}};
 use crate::install::{self, Installed, Options};
 use crate::pairing::flow;
@@ -78,8 +78,11 @@ pub struct App {
     busy: Arc<AsyncMutex<()>>,
 }
 
-/// Tiles whose screenshot is made ready after each catalog refresh.
-const FIRST_SCREENSHOTS: usize = 24;
+/// Featured's first tiles whose screenshots are made ready after each
+/// catalog refresh, and how many of each (the two an iPhone's tile shows;
+/// an iPad's shows three).
+const FIRST_TILES: usize = 12;
+const TILE_SCREENSHOTS: usize = 2;
 
 impl App {
     pub fn new() -> App {
@@ -129,6 +132,7 @@ impl App {
             "device_apps": i.device_apps,
             "app_ids": i.app_ids,
             "self_update": i.self_update,
+            "anisette_defaults": anisette::SERVERS,
             "log": crate::log::recent().iter().rev().take(80).rev().collect::<Vec<_>>(),
         })
     }
@@ -463,7 +467,8 @@ impl App {
         // The first screenshots Featured shows (its order: by name).
         let mut shown: Vec<&store::App> = catalog.iter().filter(|a| !a.screenshots.is_empty()).collect();
         shown.sort_by_key(|a| a.name.to_lowercase());
-        let shots: Vec<String> = shown.iter().take(FIRST_SCREENSHOTS).map(|a| a.screenshots[0].clone()).collect();
+        let shots: Vec<String> = shown.iter().take(FIRST_TILES)
+            .flat_map(|a| a.screenshots.iter().take(TILE_SCREENSHOTS)).cloned().collect();
         {
             let mut i = self.inner.lock().unwrap();
             i.catalog = catalog;
@@ -514,19 +519,51 @@ impl App {
         Ok(String::new())
     }
 
-    /// Options › Anisette server: "" for automatic, else a server that
-    /// answers as an anisette v3 server (asked first). Used from the next
-    /// sign-in: the current session belongs to the server it was made with.
+    /// Options › Anisette server: "" for automatic, else one of BariStore's
+    /// servers or one the user added, which must answer as an anisette v3
+    /// server (asked first). Used from the next sign-in: the current session
+    /// belongs to the server it was made with.
     pub async fn set_anisette(&self, url: &str) -> Result<String, String> {
         let url = url.trim().trim_end_matches('/');
         if url.is_empty() {
             state::save_settings(&json!({"anisette": ""}));
-            return Ok("Automatic: BariStore tries the public servers in turn.".into());
+            return Ok("Automatic: BariStore tries its servers in turn.".into());
         }
-        if !url.starts_with("https://") && !url.starts_with("http://") {
-            return Err("The address must start with https://".into());
+        if !anisette::SERVERS.contains(&url) && !anisette::added().iter().any(|s| s == url) {
+            return Err("Add the server first.".into());
         }
-        let info = crate::apple::anisette::Anisette::advertised(&gsa::http_client(), url).await?;
+        self.choose_anisette(url).await
+    }
+
+    /// Options › Anisette server › Add: a server of the user's own (http://
+    /// too, after the page's warning), checked, kept in the list and chosen.
+    pub async fn add_anisette(&self, url: &str) -> Result<String, String> {
+        let url = url.trim().trim_end_matches('/');
+        let host = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or("");
+        if host.is_empty() || host.contains(char::is_whitespace) {
+            return Err("Enter the server's address, starting with https://".into());
+        }
+        let message = self.choose_anisette(url).await?;
+        let mut list = anisette::added();
+        if !anisette::SERVERS.contains(&url) && !list.iter().any(|s| s == url) {
+            list.push(url.to_string());
+            state::save_settings(&json!({"anisette_servers": list}));
+        }
+        Ok(message)
+    }
+
+    /// Takes a server the user added off the list; Automatic again when it
+    /// was the chosen one.
+    pub fn remove_anisette(&self, url: &str) {
+        let list: Vec<String> = anisette::added().into_iter().filter(|s| s != url).collect();
+        state::save_settings(&json!({"anisette_servers": list}));
+        if anisette::chosen().as_deref() == Some(url) {
+            state::save_settings(&json!({"anisette": ""}));
+        }
+    }
+
+    async fn choose_anisette(&self, url: &str) -> Result<String, String> {
+        let info = anisette::Anisette::advertised(&gsa::http_client(), url).await?;
         state::save_settings(&json!({"anisette": url}));
         logf!("anisette: chosen {url} ({})", info.client_info);
         Ok(format!("Saved. {} answers as {}.", url.split("://").nth(1).unwrap_or(url),
@@ -608,7 +645,8 @@ impl App {
         }
         let info = crate::sign::bundle::peek(path)?;
         let (session, apple) = self.ready_to_install().await?;
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        self.step(format!("Reading {}", info.name));
+        let bytes = tokio::task::block_in_place(|| std::fs::read(path)).map_err(|e| e.to_string())?;
         self.sign_and_install(&session, &apple, bytes, opts, reuse, Installed {
             original_id: info.id, name: info.name, version: info.version, ipa_path: path.to_string_lossy().into(),
             ..Default::default()

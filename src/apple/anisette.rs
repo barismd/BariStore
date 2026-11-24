@@ -47,6 +47,17 @@ pub fn chosen() -> Option<String> {
     (url.starts_with("https://") || url.starts_with("http://")).then_some(url)
 }
 
+/// The servers the user added in Options › Anisette server, with one
+/// chosen before that list existed (1.0.0).
+pub fn added() -> Vec<String> {
+    let mut list: Vec<String> = state::settings()["anisette_servers"].as_array().into_iter().flatten()
+        .filter_map(|v| v.as_str().map(str::to_string)).collect();
+    if let Some(url) = chosen().filter(|u| !SERVERS.contains(&u.as_str()) && !list.contains(u)) {
+        list.push(url);
+    }
+    list
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ClientInfo {
     pub client_info: String,

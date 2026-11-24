@@ -227,41 +227,58 @@ async fn handle(mut stream: TcpStream, app: App, prefix: &str, port: u16) -> std
 
 /// Add IPA: the page sends the file's bytes as the request body. They go
 /// straight to ~/.baristore/ipas/ (never all in memory), then the app inside
-/// is read for the install sheet.
+/// is read for the install sheet. The socket is read in big pieces, and
+/// each piece is written with `block_in_place`: a slow disk must not hold
+/// up the worker the page's other requests need.
 async fn upload(stream: &mut TcpStream, first: &[u8], length: usize) -> Json {
     use std::io::Write;
+    const PIECE: usize = 4 << 20;
     let fail = |m: &str| json!({"ok": false, "message": m});
     if length == 0 {
         return fail("The file is empty.");
     }
+    let started = std::time::Instant::now();
     let dir = crate::state::path("ipas");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("added-{}.ipa", hex::encode(rand::random::<[u8; 6]>())));
     let Ok(mut file) = std::fs::File::create(&path) else { return fail("Cannot save the file.") };
-    let mut written = first.len().min(length);
-    if file.write_all(&first[..written]).is_err() {
-        return fail("Cannot save the file.");
-    }
-    let mut chunk = vec![0u8; 256 * 1024];
-    while written < length {
-        let n = match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n.min(length - written),
-        };
-        if file.write_all(&chunk[..n]).is_err() {
-            let _ = std::fs::remove_file(&path);
-            return fail("Cannot save the file (is the iPhone full?).");
+    let mut piece = vec![0u8; PIECE];
+    let mut filled = first.len().min(length);
+    piece[..filled].copy_from_slice(&first[..filled]);
+    let mut received = filled;
+    let mut saved = true;
+    while received < length {
+        let want = (PIECE - filled).min(length - received);
+        let n = stream.read(&mut piece[filled..filled + want]).await.unwrap_or(0);
+        if n == 0 {
+            break;
         }
-        written += n;
+        filled += n;
+        received += n;
+        if filled == PIECE {
+            saved = tokio::task::block_in_place(|| file.write_all(&piece)).is_ok();
+            filled = 0;
+            if !saved {
+                break;
+            }
+        }
+    }
+    if saved && filled > 0 {
+        saved = tokio::task::block_in_place(|| file.write_all(&piece[..filled])).is_ok();
     }
     drop(file);
-    if written < length {
+    if !saved {
+        let _ = std::fs::remove_file(&path);
+        return fail("Cannot save the file (is the iPhone full?).");
+    }
+    if received < length {
         let _ = std::fs::remove_file(&path);
         return fail("The upload stopped before the end.");
     }
-    match crate::sign::bundle::peek(&path) {
+    let secs = started.elapsed().as_secs_f64();
+    match tokio::task::block_in_place(|| crate::sign::bundle::peek(&path)) {
         Ok(info) => {
-            logf!("upload: {} {} ({} MB)", info.id, info.version, length / 1_000_000);
+            logf!("upload: {} {} ({} MB in {secs:.1} s)", info.id, info.version, length / 1_000_000);
             json!({"ok": true, "path": path.to_string_lossy(), "name": info.name, "bundle_id": info.id,
                    "version": info.version, "size": length,
                    "info": {"extensions": info.extensions, "removable": info.removable}})
@@ -412,6 +429,8 @@ async fn action(app: &App, r: &Json) -> Json {
         }
         "set_channel" => match app.set_channel(&s(r, "bundle_id"), &s(r, "channel")) { Ok(m) => ok(&m), Err(e) => fail(e) },
         "anisette" => match app.set_anisette(&s(r, "url")).await { Ok(m) => ok(&m), Err(e) => fail(e) },
+        "anisette_add" => match app.add_anisette(&s(r, "url")).await { Ok(m) => ok(&m), Err(e) => fail(e) },
+        "anisette_remove" => { app.remove_anisette(&s(r, "url")); ok("removed") }
         "update_app" => {
             let id = s(r, "bundle_id");
             app.spawn_kept(&format!("Updating {}", s(r, "name")), Some(r.clone()), move |a| async move { a.update_app(&id).await });

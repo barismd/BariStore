@@ -34,11 +34,11 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// What settings.json may hold, with the defaults: the page's theme, the
-/// install defaults, whether setup is done and the anisette server chosen
-/// in Options ("" = automatic).
+/// install defaults, whether setup is done, the anisette server chosen in
+/// Options ("" = automatic) and the anisette servers the user added.
 fn defaults() -> serde_json::Value {
     serde_json::json!({"theme": "system", "increased_memory": false, "remove_extensions": false,
-                       "setup_done": false, "anisette": ""})
+                       "setup_done": false, "anisette": "", "anisette_servers": []})
 }
 
 pub fn settings() -> serde_json::Value {
