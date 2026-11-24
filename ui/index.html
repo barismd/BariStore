@@ -255,28 +255,35 @@ const picObserver = new IntersectionObserver((entries) => {
   for (const e of entries) if (e.isIntersecting) { picObserver.unobserve(e.target); picQueue.push(e.target); }
   pumpPics();
 }, { rootMargin: "300px 300px" });
+/** Pictures shown once already: when the page is drawn again (another category, a search, the catalog refreshed)
+ *  they come straight from the browser's cache instead of waiting for a turn. */
+const shownPics = new Set();
 function pumpPics() {
   while (picsLoading < PICS_AT_ONCE && picQueue.length) {
     const img = picQueue.shift();
     if (!img.isConnected) continue;
     picsLoading++;
-    let finished = false;
-    const done = (ok) => {
-      if (finished) return;
-      finished = true; picsLoading--;
-      const box = img.parentNode, strip = box?.parentNode;
-      if (box) box.classList.remove("loading");
-      if (ok) img.classList.add("ok");
-      else if (img.dataset.drop && box) box.remove();
-      else img.remove();
-      if (strip?.classList.contains("strip")) { if (strip.children.length) placeShot(strip); else strip.remove(); }
-      pumpPics();
-    };
-    img.onload = () => done(true);
-    img.onerror = () => done(false);
-    setTimeout(() => done(img.complete && img.naturalWidth > 0), 30000);
-    img.src = img.dataset.src;
+    loadPic(img, () => { picsLoading--; pumpPics(); });
   }
+}
+/** Loads one picture into its box; `then` once it is there or failed. */
+function loadPic(img, then) {
+  let finished = false;
+  const done = (ok) => {
+    if (finished) return;
+    finished = true;
+    const box = img.parentNode, strip = box?.parentNode;
+    if (box) box.classList.remove("loading");
+    if (ok) { img.classList.add("ok"); shownPics.add(img.dataset.src); }
+    else if (img.dataset.drop && box) box.remove();
+    else img.remove();
+    if (strip?.classList.contains("strip")) { if (strip.children.length) placeShot(strip); else strip.remove(); }
+    if (then) then();
+  };
+  img.onload = () => done(true);
+  img.onerror = () => done(false);
+  setTimeout(() => done(img.complete && img.naturalWidth > 0), 30000);
+  img.src = img.dataset.src;
 }
 /** A tile's strip follows its first screenshot: landscape ones go one above the other. Screenshots of the other
  *  shape leave (the next one takes their place), and a single one left gets a blurred copy of itself behind it. */
@@ -292,7 +299,10 @@ function placeShot(strip) {
 }
 /** Hands the new pictures in `root` to the loader, and watches Featured's "more" row. */
 function hydrate(root) {
-  root.querySelectorAll("img[data-src]:not([data-seen])").forEach((i) => { i.dataset.seen = "1"; picObserver.observe(i); });
+  root.querySelectorAll("img[data-src]:not([data-seen])").forEach((i) => {
+    i.dataset.seen = "1";
+    if (shownPics.has(i.dataset.src)) loadPic(i); else picObserver.observe(i);
+  });
   const more = root.querySelector("#more");
   if (more) moreObserver.observe(more);
 }
@@ -400,7 +410,11 @@ function versionsLabel(a) {
   if (chans.length) return chans.join(" · ");
   return a.versions.length > 1 ? `${a.versions.length} sources` : a.versions[0]?.source || "";
 }
-function isInstalled(a) { return (S.installed || []).some((i) => i.original_id === a.bundle_id); }
+/** BariStore's installs of a store app: from its own catalog entry, or added by hand with its identifier. */
+function copiesOf(a) {
+  return (S.installed || []).filter((i) => i.store_key ? i.store_key === a.key : i.original_id === a.bundle_id);
+}
+function isInstalled(a) { return copiesOf(a).length > 0; }
 /** One or two lines about the app: its subtitle, else its description's first sentence. */
 function shortText(a) {
   if (a.subtitle) return a.subtitle;
@@ -465,7 +479,8 @@ function pickCategory(c) { category = c; shown = BATCH; render(); }
 function listHtml() {
   const searching = query.trim() !== "";
   const apps = listedApps();
-  const recommended = searching || category ? [] : C.apps.filter((a) => a.recommended);
+  // Recommended until it is installed.
+  const recommended = searching || category ? [] : C.apps.filter((a) => a.recommended && !isInstalled(a));
   const title = searching ? "Results" : category ? CATEGORIES.find(([k]) => k === category)[1] : "All apps";
   const errors = C.sources.filter((s) => s.error);
   return `${recommended.length ? `<h2>Recommended</h2><div class="hero">${recommended.map(heroRow).join("")}</div>` : ""}
@@ -509,9 +524,10 @@ function removeSource(url, name) {
 let pickVersion = 0, opts = {};
 /** What the install sheet knows about the app's extensions: {state: "loading" | "ok" | "error", extensions, removable}. */
 let ipaInfo = null;
+/** reuse_id: the App ID choice the user tapped (null: the first one, see idChoices). */
 function freshOpts() {
   return { remove_extensions: !!S.settings.remove_extensions, increased_memory: !!S.settings.increased_memory,
-           reuse_id: "", reuse_extensions: false };
+           reuse_id: null, reuse_extensions: false };
 }
 function openApp(key) {
   detail = C.apps.find((a) => a.key === key);
@@ -532,10 +548,46 @@ async function loadIpaInfo() {
   ipaInfo = r.ok ? { state: "ok", ...r.info } : { state: "error" };
   renderSheet();
 }
+/** The install sheet's App ID choices for an app (`bundle_id`: its own identifier, `name`), best first:
+ *  - copies of it BariStore installed: Replace (the new build goes over one as an update: its App IDs, its data);
+ *  - its own App ID (identifier + team) when there is one: free, it is taken again (what a new one would be);
+ *    installed under it another way, Replace; another app reused it, an option that replaces that app;
+ *  - New App ID (one no app on the iPhone is installed under);
+ *  - App IDs of apps no longer on the iPhone. */
+function idChoices(app) {
+  const team = S.setup.team, ids = S.app_ids, list = ids?.list || [];
+  const own = app.bundle_id.endsWith("." + team) ? app.bundle_id : app.bundle_id + "." + team;
+  const until = (a) => a?.expires ? " · until " + dateText(a.expires) : "";
+  const copies = (S.installed || []).filter((i) => i.original_id === app.bundle_id);
+  const out = copies.map((i) => ({ id: i.bundle_id, replace: true, title: `Replace ${i.name} ${i.version || ""}`.trim(),
+    note: i.bundle_id, hint: "Installed with BariStore. It is updated in place: its data and App IDs stay." }));
+  const mine = list.find((a) => a.identifier === own);
+  let other = null;
+  if (mine && !copies.some((i) => i.bundle_id === own)) {
+    if (!mine.app) out.push({ id: own, title: "Its own App ID", note: own + until(mine), hint: "Made for it before and free again." });
+    else if (!mine.note.startsWith("used by")) out.push({ id: own, replace: true, title: `Replace ${mine.app}`, note: own,
+      hint: `${mine.app} is on this ${DEVICE} under its own App ID. It is updated in place: its data stays.` });
+    else other = { id: own, title: "Its own App ID", note: own,
+      warn: `${mine.app} is installed under it now: installing replaces ${mine.app}.` };
+  }
+  if (!mine || mine.app) out.push({ id: "", title: "New App ID", note: ids?.list ? `${ids.left} of ${ids.max} left` : "" });
+  if (other) out.push(other);
+  for (const a of list) {
+    if (!a.app && a.identifier !== own && !copies.some((i) => i.bundle_id === a.identifier)) {
+      out.push({ id: a.identifier, reused: true, title: `Reuse ${a.name}`, note: a.identifier + until(a) });
+    }
+  }
+  return out;
+}
+/** The choice picked: the one tapped, else the first. */
+function idChoice(app) {
+  const all = idChoices(app);
+  return all.find((c) => c.id === opts.reuse_id) || all[0];
+}
 /** The App ID choice's "Extensions too": whether it can be on, and what to say. */
-function extensionsToo() {
-  const ids = S.app_ids, pick = opts.reuse_id;
-  if (!pick || !ids?.list) return null;
+function extensionsToo(choice) {
+  const ids = S.app_ids, pick = choice?.id;
+  if (!pick || choice.replace || !ids?.list) return null;
   const freeUnder = ids.list.filter((a) => !a.app && a.identifier.startsWith(pick + ".")).length;
   const known = ipaInfo?.state === "ok";
   const need = known ? (opts.remove_extensions ? ipaInfo.extensions - ipaInfo.removable : ipaInfo.extensions) : null;
@@ -545,19 +597,18 @@ function extensionsToo() {
   if (!known) return { ok: freeUnder > 0, note: `BariStore could not count the app's extensions before downloading it; ${under}.` };
   return { ok: freeUnder >= need, note: `The app has ${plural(need, "extension")}; ${under}.${freeUnder >= need ? "" : " Too few: they get new App IDs."}` };
 }
-/** Options and the App ID choice, the same for store apps and added IPAs. */
-function installOptionsHtml() {
-  const ids = S.app_ids;
-  const free = ids && ids.list ? ids.list.filter((a) => !a.app) : [];
-  const choice = (id, title, note) => `<div class="choice ${opts.reuse_id === id ? "on" : ""}" data-id="${esc(id)}" onclick="opts.reuse_id=this.dataset.id;renderSheet()">
-      <div class="radio"></div><div class="grow"><div style="font-weight:600" class="ell">${esc(title)}</div><div class="muted small ell">${esc(note)}</div></div></div>`;
-  const ext = extensionsToo();
-  const appIds = !S.setup.signed_in ? "" : !ids || !ids.list
-    ? `<div class="muted small">${appIdsError ? esc(appIdsError) : "Loading your App IDs…"}</div>`
-    : `${choice("", "New App ID", `${ids.left} of ${ids.max} left`)}
-       ${free.map((a) => choice(a.identifier, `Reuse ${a.name}`, `${a.identifier}${a.expires ? " · until " + dateText(a.expires) : ""}`)).join("")}
-       ${ext && !ext.hidden ? `<div class="card" style="margin-top:8px">${toggleRow("opt:reuse_extensions", "Extensions too", `Extensions take free App IDs under the chosen one instead of new ones. ${esc(ext.note)}`, opts.reuse_extensions && ext.ok, !ext.ok)}</div>` : ""}
-       ${free.length ? "" : `<div class="muted small" style="margin-top:6px">No App ID of a deleted app is free to reuse.</div>`}`;
+/** Options and the App ID choice, the same for store apps and added IPAs (`app`: bundle_id, name). */
+function installOptionsHtml(app) {
+  const ids = S.app_ids, choices = idChoices(app), picked = idChoice(app);
+  const choice = (c) => `<div class="choice ${c.id === picked.id ? "on" : ""}" data-id="${esc(c.id)}" onclick="opts.reuse_id=this.dataset.id;renderSheet()">
+      <div class="radio"></div><div class="grow"><div style="font-weight:600" class="ell">${esc(c.title)}</div>
+      ${c.note ? `<div class="muted small ell">${esc(c.note)}</div>` : ""}${c.hint ? `<div class="muted small">${esc(c.hint)}</div>` : ""}
+      ${c.warn ? `<div class="note">${esc(c.warn)}</div>` : ""}</div></div>`;
+  const ext = extensionsToo(picked);
+  const appIds = !S.setup.signed_in ? "" : `${choices.map(choice).join("")}
+       ${!ids || !ids.list ? `<div class="muted small" style="margin-top:6px">${appIdsError ? esc(appIdsError) : "Loading your App IDs…"}</div>`
+         : choices.some((c) => c.reused) ? "" : `<div class="muted small" style="margin-top:6px">No App ID of a deleted app is free to reuse.</div>`}
+       ${ext && !ext.hidden ? `<div class="card" style="margin-top:8px">${toggleRow("opt:reuse_extensions", "Extensions too", `Extensions take free App IDs under the chosen one instead of new ones. ${esc(ext.note)}`, opts.reuse_extensions && ext.ok, !ext.ok)}</div>` : ""}`;
   return `<h2>Options</h2>
     <div class="card">
       ${toggleRow("opt:remove_extensions", "Remove extensions", "Uses fewer App IDs (a free Apple ID has 10). Widgets and share sheets of this app stop working.", opts.remove_extensions)}
@@ -568,7 +619,7 @@ function installOptionsHtml() {
 function detailSheet() {
   const a = detail;
   const v = a.versions[pickVersion] || a.versions[0];
-  const installed = (S.installed || []).find((i) => i.original_id === a.bundle_id);
+  const installed = copiesOf(a)[0];
   const versions = a.versions.map((x, i) => `<div class="choice ${i === pickVersion ? "on" : ""}" data-i="${i}" onclick="pickDetailVersion(+this.dataset.i)">
       <div class="radio"></div><div class="grow"><div style="font-weight:600">${esc(channelName(a, x))}
       <span class="muted" style="font-weight:400">${esc(x.version)}</span></div>
@@ -582,23 +633,33 @@ function detailSheet() {
     body: `${a.subtitle ? `<p>${esc(a.subtitle)}</p>` : ""}
       ${(a.screenshots || []).length ? `<div class="shots">${a.screenshots.map((u) => `<div class="pic loading">${pic(shotUrl(u, 1100), true)}</div>`).join("")}</div>` : ""}
       <h2>${a.versions.length > 1 ? "Choose a version" : "Version"}</h2>${versions}
-      ${installOptionsHtml()}
+      ${installOptionsHtml(a)}
       ${a.description ? `<h2>About</h2><p class="muted small" style="white-space:pre-wrap">${esc(a.description.slice(0, 1500))}</p>` : ""}
       ${v && v.notes ? `<details><summary>Release notes</summary><p class="small muted" style="white-space:pre-wrap">${esc(v.notes)}</p></details>` : ""}`,
-    foot: `<button class="btn" onclick="install()">${installed ? "Install again" : "Install"}</button>`,
+    foot: `<button class="btn" onclick="install()">${installLabel(a, v?.version)}</button>`,
   };
+}
+/** The install button: Update or Install again when the new build goes over an installed one. */
+function installLabel(app, version) {
+  const c = idChoice(app);
+  if (!c?.replace) return "Install";
+  const copy = (S.installed || []).find((i) => i.bundle_id === c.id);
+  return copy && version && copy.version !== version ? "Update" : "Install again";
 }
 /** A version's name on the detail sheet: its track ("Nightly"), "Stable" beside tracks, else its source. */
 function channelName(a, x) {
   if (x.channel) return x.channel[0].toUpperCase() + x.channel.slice(1);
   return a.versions.some((v) => v.source_url === x.source_url && v.channel) ? "Stable" : x.source;
 }
-/** What the install sheet sends: "Extensions too" only when it is allowed. */
-function installOpts() { return { ...opts, reuse_extensions: !!(opts.reuse_extensions && extensionsToo()?.ok) }; }
+/** What the install sheet sends: the App ID choice, "Extensions too" only when it is allowed. */
+function installOpts(app) {
+  const c = idChoice(app);
+  return { ...opts, reuse_id: c?.id || "", reuse_extensions: !!(opts.reuse_extensions && extensionsToo(c)?.ok) };
+}
 function install() {
   const a = detail;
   closeSheet();
-  act("install", { key: a.key, version: pickVersion, name: a.name, ...installOpts() });
+  act("install", { key: a.key, version: pickVersion, name: a.name, ...installOpts(a) });
 }
 
 // ---------------------------------------------------------------- add IPA
@@ -666,15 +727,16 @@ function uploadSheet() {
 function cancelUpload() { const xhr = sheet?.xhr; closeSheet(); xhr?.abort(); }
 function localSheet(ipa) {
   return {
-    title: ipa.name,
-    body: `<p class="muted small">${esc(ipa.bundle_id)} · ${esc(ipa.version)} · ${Math.round(ipa.size / 1e6)} MB</p>${installOptionsHtml()}`,
-    foot: `<button class="btn" onclick="installLocal()">Install</button>`,
+    head: `${iconHtml({ name: ipa.name, icon_url: ipa.icon_url }, true)}<div class="grow"><div style="font-size:20px;font-weight:700" class="ell">${esc(ipa.name)}</div>
+      <div class="muted small ell">${esc(ipa.bundle_id)}</div><div class="muted small">${esc(ipa.version)} · ${Math.round(ipa.size / 1e6)} MB</div></div>`,
+    body: installOptionsHtml(ipa),
+    foot: `<button class="btn" onclick="installLocal()">${installLabel(ipa, ipa.version)}</button>`,
   };
 }
 function installLocal() {
   const ipa = sheet.ipa;
   closeSheet();
-  act("install_local", { path: ipa.path, name: ipa.name, ...installOpts() });
+  act("install_local", { path: ipa.path, name: ipa.name, ...installOpts(ipa) });
 }
 
 // ---------------------------------------------------------------- my apps

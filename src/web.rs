@@ -280,7 +280,7 @@ async fn upload(stream: &mut TcpStream, first: &[u8], length: usize) -> Json {
         Ok(info) => {
             logf!("upload: {} {} ({} MB in {secs:.1} s)", info.id, info.version, length / 1_000_000);
             json!({"ok": true, "path": path.to_string_lossy(), "name": info.name, "bundle_id": info.id,
-                   "version": info.version, "size": length,
+                   "version": info.version, "size": length, "icon_url": crate::icons::ipa_icon_url(&path),
                    "info": {"extensions": info.extensions, "removable": info.removable}})
         }
         Err(e) => {

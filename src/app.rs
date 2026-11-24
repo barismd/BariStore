@@ -111,6 +111,7 @@ impl App {
                 i.setup.team_name = parts.next().unwrap_or("").trim().into();
             }
         }
+        prune_ipas();
         app
     }
 
@@ -200,6 +201,8 @@ impl App {
             }
             logf!("task: start {title}");
             let result = job(app.clone()).await;
+            // Before the next task can start: IPAs this one left unneeded.
+            prune_ipas();
             let mut i = app.inner.lock().unwrap();
             let t = i.task.get_or_insert_with(Task::default);
             t.done = true;
@@ -464,6 +467,9 @@ impl App {
         }
         let (catalog, sources) = store::refresh().await;
         let icons: Vec<String> = catalog.iter().map(|a| a.icon.clone()).collect();
+        // Every picture the page may still show; the cache drops the rest.
+        let mut keep: Vec<String> = catalog.iter().flat_map(|a| a.screenshots.iter().chain([&a.icon])).cloned().collect();
+        keep.extend(install::installed().into_iter().map(|i| i.icon_url));
         // The first screenshots Featured shows (its order: by name).
         let mut shown: Vec<&store::App> = catalog.iter().filter(|a| !a.screenshots.is_empty()).collect();
         shown.sort_by_key(|a| a.name.to_lowercase());
@@ -475,7 +481,11 @@ impl App {
             i.sources = sources;
             i.refreshing = false;
         }
+        if let Ok(_idle) = self.busy.try_lock() {
+            prune_ipas();
+        }
         tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || crate::icons::prune(&keep)).await;
             crate::icons::prefetch(icons, crate::icons::ICON, 2).await;
             crate::icons::prefetch(shots, crate::icons::TILE, 1).await;
         });
@@ -629,12 +639,14 @@ impl App {
         }).await?;
         logf!("install: downloaded in {:.1} s", started.elapsed().as_secs_f64());
         let bytes = std::fs::read(&ipa_path).map_err(|e| e.to_string())?;
-        self.sign_and_install(&session, &apple, bytes, opts, reuse, Installed {
+        let mut installed = Installed {
             original_id: entry.bundle_id.clone(), name: entry.name.clone(), version: v.version.clone(),
             source_url: v.url.clone(), ipa_path: ipa_path.to_string_lossy().into(), icon_url: entry.icon.clone(),
             store_key: entry.key.clone(), origin: v.source_url.clone(), channel: v.channel.clone(),
             ..Default::default()
-        }).await
+        };
+        let reuse = replacing(&mut installed, reuse);
+        self.sign_and_install(&session, &apple, bytes, opts, reuse, installed).await
     }
 
     /// Installs an IPA the user picked (uploaded by the page into ipas/).
@@ -647,10 +659,12 @@ impl App {
         let (session, apple) = self.ready_to_install().await?;
         self.step(format!("Reading {}", info.name));
         let bytes = tokio::task::block_in_place(|| std::fs::read(path)).map_err(|e| e.to_string())?;
-        self.sign_and_install(&session, &apple, bytes, opts, reuse, Installed {
+        let mut installed = Installed {
             original_id: info.id, name: info.name, version: info.version, ipa_path: path.to_string_lossy().into(),
-            ..Default::default()
-        }).await
+            icon_url: crate::icons::ipa_icon_url(path), ..Default::default()
+        };
+        let reuse = replacing(&mut installed, reuse);
+        self.sign_and_install(&session, &apple, bytes, opts, reuse, installed).await
     }
 
     async fn sign_and_install(&self, session: &Session, apple: &(gsa::GrandSlam, gsa::Account), bytes: Vec<u8>,
@@ -1173,6 +1187,24 @@ impl App {
     }
 }
 
+/// The install sheet's "Replace": the App ID picked is the one a copy of
+/// the same app that BariStore installed has. The new build goes over it as
+/// an update does: under its App IDs (extensions' too), keeping its data,
+/// and in its place in My Apps.
+fn replacing(entry: &mut Installed, reuse: install::Reuse) -> install::Reuse {
+    let copy = reuse.pick.as_deref().and_then(|pick| install::installed().into_iter()
+        .find(|i| i.bundle_id == pick && i.original_id == entry.original_id));
+    match copy {
+        Some(copy) => {
+            logf!("install: {} goes over {} ({})", entry.name, copy.name, copy.bundle_id);
+            entry.bundle_id = copy.bundle_id;
+            entry.ids = copy.ids;
+            install::Reuse::default()
+        }
+        None => reuse,
+    }
+}
+
 /// What My Apps says about each App ID. An app installed under the App ID
 /// of another (a reused one) is named as the App ID, "used by" the app;
 /// its extensions' App IDs, made under that App ID, are named as the app,
@@ -1221,6 +1253,29 @@ pub fn boot_id() -> &'static str {
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BOOT.get_or_init(|| format!("{}-{}", std::process::id(), std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()))
+}
+
+/// Drops the IPAs no installed app needs (other versions, apps deleted or
+/// replaced, IPAs added but never installed) and broken downloads. Files
+/// from the last hour stay: an install sheet may be open for one, or a
+/// failed install be tried again. Run while no task is.
+fn prune_ipas() {
+    let keep: Vec<std::path::PathBuf> = install::installed().into_iter().map(|i| i.ipa_path.into()).collect();
+    let Ok(dir) = std::fs::read_dir(state::path("ipas")) else { return };
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let mut freed = 0;
+    for e in dir.flatten() {
+        let Ok(meta) = e.metadata() else { continue };
+        if meta.modified().map_or(true, |m| m > hour_ago) || keep.contains(&e.path()) {
+            continue;
+        }
+        if std::fs::remove_file(e.path()).is_ok() {
+            freed += meta.len();
+        }
+    }
+    if freed > 0 {
+        logf!("cache: {} MB of IPAs no app needs removed", freed / 1_000_000);
+    }
 }
 
 fn dir_size(dir: &std::path::Path) -> u64 {

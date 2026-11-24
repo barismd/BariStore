@@ -3,7 +3,8 @@
 //! and TLS_PSK_WITH_AES_128_CBC_SHA (0x008C). Empty PSK identity; the PSK is the
 //! X25519 secret from pair-verify. Client side only.
 
-use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::generic_array::{typenum::U16, GenericArray};
+use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncrypt, KeyInit, KeyIvInit};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384};
@@ -129,33 +130,83 @@ fn io_err(msg: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, msg.into())
 }
 
+/// The record cipher, its key expanded once.
+enum Cipher {
+    Aes256(aes::Aes256),
+    Aes128(aes::Aes128),
+}
+
 pub struct Keys {
     suite: Suite,
     mac: Vec<u8>,
     key: Vec<u8>,
+    cipher: Cipher,
     seq: u64,
 }
 
+/// CBC encryption of several records at once. Each record is its own chain,
+/// starting from its IV (the 16 bytes before it), so the block cipher gets
+/// the next block of up to eight records per call. Software AES (aarch64
+/// without AES instructions) computes four blocks per call whatever it is
+/// given: one record at a time, three quarters of that work was wasted, and
+/// it was most of an upload's time on Minis's emulated CPU. `records`:
+/// (offset of the IV in `buf`, length of the padded plaintext after it).
+fn cbc_lockstep<C: BlockEncrypt<BlockSize = U16>>(cipher: &C, buf: &mut [u8], records: &[(usize, usize)]) {
+    const AT_ONCE: usize = 8;
+    let mut blocks = [GenericArray::<u8, U16>::default(); AT_ONCE];
+    for group in records.chunks(AT_ONCE) {
+        let longest = group.iter().map(|r| r.1).max().unwrap_or(0);
+        for offset in (0..longest).step_by(16) {
+            let mut n = 0;
+            for &(iv, _) in group.iter().filter(|r| offset < r.1) {
+                let at = iv + 16 + offset;
+                // The block before: the IV, or the one just encrypted.
+                for k in 0..16 {
+                    blocks[n][k] = buf[at + k] ^ buf[at - 16 + k];
+                }
+                n += 1;
+            }
+            cipher.encrypt_blocks(&mut blocks[..n]);
+            for (block, &(iv, _)) in blocks.iter().zip(group.iter().filter(|r| offset < r.1)) {
+                let at = iv + 16 + offset;
+                buf[at..at + 16].copy_from_slice(block);
+            }
+        }
+    }
+}
+
 impl Keys {
-    fn seal(&mut self, kind: u8, plain: &[u8]) -> Vec<u8> {
-        let mut payload = plain.to_vec();
-        let mac = self.suite.mac(&self.mac, &[
-            &self.seq.to_be_bytes(), &[kind], &VERSION, &(plain.len() as u16).to_be_bytes(), plain]);
-        payload.extend_from_slice(&mac);
-        let pad = 16 - (payload.len() % 16);
-        payload.extend(std::iter::repeat((pad - 1) as u8).take(pad));
-        let iv: [u8; 16] = rand::random();
-        let len = payload.len();
-        match self.suite {
-            Suite::Aes256Sha384 => cbc::Encryptor::<aes::Aes256>::new_from_slices(&self.key, &iv)
-                .unwrap().encrypt_padded_mut::<NoPadding>(&mut payload, len).unwrap(),
-            Suite::Aes128Sha => cbc::Encryptor::<aes::Aes128>::new_from_slices(&self.key, &iv)
-                .unwrap().encrypt_padded_mut::<NoPadding>(&mut payload, len).unwrap(),
+    fn new(suite: Suite, mac: &[u8], key: &[u8]) -> Keys {
+        let cipher = match suite {
+            Suite::Aes256Sha384 => Cipher::Aes256(aes::Aes256::new_from_slice(key).expect("a 32-byte key")),
+            Suite::Aes128Sha => Cipher::Aes128(aes::Aes128::new_from_slice(key).expect("a 16-byte key")),
         };
-        self.seq += 1;
-        let mut body = iv.to_vec();
-        body.extend_from_slice(&payload);
-        record(kind, &body)
+        Keys { suite, mac: mac.to_vec(), key: key.to_vec(), cipher, seq: 0 }
+    }
+
+    /// `data` as records of `kind` (MAC-then-encrypt, a random IV each),
+    /// appended to `out`: written in place, then encrypted all together.
+    fn seal_into(&mut self, kind: u8, data: &[u8], out: &mut Vec<u8>) {
+        let mut records = Vec::with_capacity(data.len().div_ceil(MAX_PLAINTEXT));
+        for plain in data.chunks(MAX_PLAINTEXT) {
+            let mac = self.suite.mac(&self.mac, &[
+                &self.seq.to_be_bytes(), &[kind], &VERSION, &(plain.len() as u16).to_be_bytes(), plain]);
+            self.seq += 1;
+            let padded = (plain.len() + mac.len()) / 16 * 16 + 16;
+            let pad = padded - plain.len() - mac.len();
+            out.push(kind);
+            out.extend_from_slice(&VERSION);
+            out.extend_from_slice(&((16 + padded) as u16).to_be_bytes());
+            records.push((out.len(), padded));
+            out.extend_from_slice(&rand::random::<[u8; 16]>());
+            out.extend_from_slice(plain);
+            out.extend_from_slice(&mac);
+            out.extend(std::iter::repeat_n((pad - 1) as u8, pad));
+        }
+        match &self.cipher {
+            Cipher::Aes256(c) => cbc_lockstep(c, out, &records),
+            Cipher::Aes128(c) => cbc_lockstep(c, out, &records),
+        }
     }
 
     fn open(&mut self, kind: u8, body: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -195,10 +246,9 @@ pub struct TlsWriter<W> {
 
 impl<W: AsyncWrite + Unpin> TlsWriter<W> {
     pub async fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        let mut out = Vec::with_capacity(data.len() + 128);
-        for chunk in data.chunks(MAX_PLAINTEXT) {
-            out.extend_from_slice(&self.keys.seal(CT_DATA, chunk));
-        }
+        // Per record at most: header, IV, MAC and padding.
+        let mut out = Vec::with_capacity(data.len() + data.len().div_ceil(MAX_PLAINTEXT) * 85);
+        self.keys.seal_into(CT_DATA, data, &mut out);
         self.inner.write_all(&out).await?;
         self.inner.flush().await
     }
@@ -291,8 +341,8 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin
     expansion_seed.extend_from_slice(&client_random);
     let (m, k) = (suite.mac_len(), suite.key_len());
     let block = suite.prf(&master, b"key expansion", &expansion_seed, 2 * m + 2 * k);
-    let mut client = Keys { suite, mac: block[..m].to_vec(), key: block[2 * m..2 * m + k].to_vec(), seq: 0 };
-    let mut server = Keys { suite, mac: block[m..2 * m].to_vec(), key: block[2 * m + k..2 * m + 2 * k].to_vec(), seq: 0 };
+    let mut client = Keys::new(suite, &block[..m], &block[2 * m..2 * m + k]);
+    let mut server = Keys::new(suite, &block[m..2 * m], &block[2 * m + k..2 * m + 2 * k]);
 
     let key_exchange = handshake_msg(16, &[0, 0]);
     transcript.extend_from_slice(&key_exchange);
@@ -300,7 +350,7 @@ where R: AsyncRead + Unpin, W: AsyncWrite + Unpin
     out.extend_from_slice(&record(CT_CCS, &[1]));
     let verify = suite.prf(&master, b"client finished", &suite.transcript_hash(&transcript), 12);
     let finished = handshake_msg(20, &verify);
-    out.extend_from_slice(&client.seal(CT_HANDSHAKE, &finished));
+    client.seal_into(CT_HANDSHAKE, &finished, &mut out);
     transcript.extend_from_slice(&finished);
     writer.write_all(&out).await?;
     writer.flush().await?;
@@ -365,6 +415,74 @@ mod tests {
     #[tokio::test]
     async fn aes256_sha384_with_openssl() {
         against_openssl("PSK-AES256-CBC-SHA384").await;
+    }
+
+    /// Records encrypted side by side are what CBC makes of each alone.
+    #[test]
+    fn lockstep_is_cbc() {
+        let key: [u8; 32] = rand::random();
+        // Three records at odd offsets, the last one short.
+        let lens = [16384 + 64, 16384 + 64, 4096 + 48];
+        let mut buf = vec![0u8; 3];
+        let mut records = Vec::new();
+        for len in lens {
+            records.push((buf.len(), len));
+            buf.extend((0..16 + len).map(|_| rand::random::<u8>()));
+            buf.push(0xEE);
+        }
+        let plain = buf.clone();
+        cbc_lockstep(&aes::Aes256::new_from_slice(&key).unwrap(), &mut buf, &records);
+        for (iv, len) in records {
+            let mut alone = plain[iv + 16..iv + 16 + len].to_vec();
+            use aes::cipher::BlockEncryptMut;
+            cbc::Encryptor::<aes::Aes256>::new_from_slices(&key, &plain[iv..iv + 16]).unwrap()
+                .encrypt_padded_mut::<NoPadding>(&mut alone, len).unwrap();
+            assert_eq!(&buf[iv + 16..iv + 16 + len], &alone[..]);
+            assert_eq!(buf[iv + 16 + len], 0xEE);
+        }
+    }
+
+    /// Many records in one write (sealed together) reach OpenSSL intact.
+    #[tokio::test]
+    async fn many_records_with_openssl() {
+        let psk = [0x33u8; 32];
+        let port = 20000 + (rand::random::<u16>() % 20000);
+        let mut server = std::process::Command::new("openssl")
+            .args(["s_server", "-quiet", "-rev", "-nocert", "-tls1_2", "-accept", &port.to_string(),
+                   "-psk", &hex::encode(psk), "-cipher", "PSK-AES256-CBC-SHA384"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("openssl s_server");
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let (r, w) = stream.expect("server up").into_split();
+        let (mut reader, mut writer) = connect(r, w, &psk).await.expect("handshake");
+        let lines: Vec<Vec<u8>> = (0..6).map(|i| (0..12000).map(|j| b'a' + ((i * 7 + j * 13) % 26) as u8).collect()).collect();
+        let mut sent = Vec::new();
+        for l in &lines {
+            sent.extend_from_slice(l);
+            sent.push(b'\n');
+        }
+        writer.write(&sent).await.unwrap();
+        let mut expected = Vec::new();
+        for l in &lines {
+            expected.extend(l.iter().rev());
+            expected.push(b'\n');
+        }
+        let mut got = Vec::new();
+        while got.len() < expected.len() {
+            got.extend(reader.read().await.unwrap());
+        }
+        let _ = server.kill();
+        assert!(got == expected, "{} bytes back, {} expected", got.len(), expected.len());
     }
 
     #[tokio::test]

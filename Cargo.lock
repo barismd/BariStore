@@ -78,7 +78,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "baristore"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -86,6 +86,7 @@ dependencies = [
  "cbc",
  "chacha20poly1305",
  "ed25519-dalek",
+ "flate2",
  "futures-util",
  "hex",
  "hkdf",

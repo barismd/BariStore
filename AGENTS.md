@@ -44,6 +44,30 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   zip directory). Extensions cannot take another app's App ID: iOS requires
   an extension's identifier to start with its app's. JIT (owner,
   2026-11-21): built in `src/device/jit.rs`.
+- Install sheet App IDs (owner, 1.0.2: a deleted app's own App ID showed
+  "New App ID"; a newer build of an added IPA became a second app), best
+  first: Replace each copy BariStore installed of the same app (original
+  identifier; goes over it as an update, its App IDs and data stay; button
+  "Update"/"Install again"); its own App ID (identifier.TEAM) when it
+  exists: free, "Its own App ID" and no "New App ID"; installed under it
+  another way, Replace; another app reused it, "New App ID" first and its
+  own one with "installing replaces X"; then App IDs of apps no longer on
+  the iPhone. "New App ID" never takes an app's place on the iPhone: when
+  an app is installed under identifier.TEAM, the app gets identifier2.TEAM
+  (3…). Unknown case: a BariStore record whose app was deleted outside
+  BariStore and whose App ID another tool reused still offers Replace.
+- Recommended lists only apps not installed (an install's store key, or
+  the original identifier for added IPAs).
+- An added IPA's icon comes from the IPA ("ipa:<file in ipas/>" icon
+  address): the biggest PNG in the app that Info.plist names, Xcode's CgBI
+  PNGs (BGRA, premultiplied, raw deflate) turned into plain ones. Apps with
+  their icon only in Assets.car show the letter.
+- Cache (owner, 1.0.2: it piled up): after every task, at start and on a
+  catalog refresh with no task running, ipas/ keeps only IPAs installed
+  apps need and files from the last hour (an open install sheet, a retry);
+  pictures of apps no source lists go after each catalog refresh, and the
+  oldest beyond 80 MB; baristore.log and server.out are cut to their last
+  512 KB past 2 MB (they only ever grew).
 - Install, refresh, JIT and update run under the same silent-speech
   keep-alive as pairing (owner: a precaution, not a feature).
 - Versions: 1.0.0 is the first stable release (history squashed). CI builds
@@ -79,6 +103,14 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
 - Tunnel TCP (as jktcp, idevice's device-proven stack): MSS = min(MTU from the
   CDTunnel handshake, 8192) - 60, window scale option sent (shift 0) and the
   peer's honoured, at most 1 MiB in flight; AFC writes 1 MiB per request.
+- Upload speed (owner, 1.0.1: 160 MB took about a minute): the tunnel's
+  TLS (AES-256-CBC + HMAC-SHA384) is CPU-bound on the emulated CPU, and
+  the aes crate without AES instructions computes four blocks per call, so
+  CBC one record at a time wasted three quarters: records are now
+  encrypted eight side by side (`cbc_lockstep`, 3.2× in software), and
+  aarch64 builds enable `--cfg aes_armv8` (AES instructions when AT_HWCAP
+  reports them, as ring already does for HTTPS; else the same software).
+  The log says "install: sent N MB in X s". Untested on device.
 - Minis's kernel (OpenMinis/ish-arm64, fs/sock.h) takes SO_RCVTIMEO/
   SO_SNDTIMEO only as 66/67; a 64-bit musl program sets 20/21 and gets EINVAL,
   so std's `set_read_timeout` fails there: no socket timeouts, wait on a
@@ -117,7 +149,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   Memory: IPAs are streamed to disk and only Mach-O/plist entries are kept in
   memory while signing; signing, packing, RSA key generation and hashing a
   cached IPA run with `block_in_place`; icon and screenshot decoding is
-  bounded, one icon and one screenshot at a time; one shared HTTP client
+  bounded, one icon and two screenshots at a time (the prefetch takes one
+  turn at most), and a picture being made is not made again for a second
+  request (the page and the prefetch asked for the same ones); one shared HTTP client
   (TLS handshakes are slow on the emulated CPU); the first 12 tiles' first
   two screenshots are made ready after each catalog refresh; two tokio
   workers.
@@ -125,6 +159,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   near, the first 12 again on a new category or search) and loads pictures
   3 at a time, those near the screen first, each with a spinner until it is
   there (owner, 1.0.0: pictures came slowly with every one asked at once).
+  Pictures it showed once skip that queue when the page is drawn again
+  (owner, 1.0.1: the new tiles loaded slower; each category switch sent
+  every picture through the queue again).
 - Wi-Fi cannot be read in Minis. A connect to 10.7.0.1 that times out means no
   route (mobile data or no VPN): say so, never knock 16 000 ports then
   (siboot's preflight); a refused port does mean "look on other ports".
@@ -253,6 +290,13 @@ against a mock device, CSR and PKCS#12 with openssl (3.x and 1.1.1), signatures
 with rcodesign. **Device-verified (owner):** LocalDevVPN check, pairing (0.1.0); Apple sign-in
 with 2FA, signing and installing an app (0.10.0-alpha.3).
 Everything else: say "untested on device" until the owner confirms.
+Linux-verified for 1.0.2: the page in Playwright against a mock server
+(App ID choices: own free, own reused by another app, an installed copy,
+New on request, an added IPA over its installed copy, its icon in the sheet
+and My Apps, Recommended without installed apps, pictures back at once
+after a category switch); the real server's upload answer and its ipa:
+icon (largest named PNG, path checks); CgBI conversion; TLS records sealed
+side by side against the cbc crate and OpenSSL s_server; log trimming.
 Linux-verified for 1.0.1: the page in Playwright against a mock server (tile
 strips at 375/390/820 px with portrait, landscape, single and mixed
 screenshots, Add IPA picking/cancel/upload/cancel, the Anisette sheet), the

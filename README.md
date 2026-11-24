@@ -22,7 +22,7 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 - **Uses none of your 3 app slots.** It runs inside [Open Minis](https://apps.apple.com/app/id6759188481) and works like an App Store app.
 - **Refresh in seconds.** A refresh renews the apps' profiles: nothing is downloaded, signed or uploaded again (apps signed with an older certificate are signed again).
 - **JIT with one tap** for emulators and other JIT apps, right from BariStore.
-- **Sources and updates.** App sources, any IPA from Files, one-tap updates, and per-app beta tracks (Off, nightly, alpha…).
+- **Sources and updates.** App sources, any IPA from Files (a newer build of one updates it in place), one-tap updates, and per-app beta tracks (Off, nightly, alpha…).
 - **Your App IDs under control.** See what uses each one, reuse the App IDs of deleted apps, keep or drop extensions, ask for Increased Memory Limit.
 - **Works with the other tools.** SideStore, AltStore, LiveContainer + SideStore and StikDebug get the pairing file; the stores and LiveContainer get the signing certificate, so they can refresh themselves too.
 

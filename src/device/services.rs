@@ -236,11 +236,15 @@ impl Afc {
 pub async fn install(session: &Session, ipa: &[u8], progress: &mut (dyn FnMut(&str, u32) + Send)) -> Result<(), String> {
     let remote = format!("/PublicStaging/baristore-{}.ipa", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     {
+        let started = std::time::Instant::now();
         let mut afc = Afc::open(session).await?;
         let _ = afc.mkdir("/PublicStaging").await;
         afc.write_file(&remote, ipa, &mut |done, total| {
             progress("Uploading", (done * 100 / total.max(1)) as u32);
         }).await?;
+        let secs = started.elapsed().as_secs_f64();
+        crate::logf!("install: sent {} MB in {secs:.1} s ({:.1} MB/s)", ipa.len() / 1_000_000,
+                     ipa.len() as f64 / 1e6 / secs.max(0.001));
     }
     let result = async {
         let mut s = ServiceConn::open(session, INSTALL).await?;

@@ -324,7 +324,10 @@ fn supervise() -> ExitCode {
             }
         }
     }
-    let log = || std::fs::OpenOptions::new().create(true).append(true).open(state::path("server.out"));
+    let log = || {
+        crate::log::trim(&state::path("server.out"));
+        std::fs::OpenOptions::new().create(true).append(true).open(state::path("server.out"))
+    };
     let mut crashes: Vec<std::time::Instant> = Vec::new();
     let mut own_group = true;
     loop {

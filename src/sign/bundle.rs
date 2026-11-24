@@ -150,6 +150,53 @@ pub fn peek(path: &std::path::Path) -> Result<Peek, String> {
     Ok(Peek { name, id, version: text("CFBundleShortVersionString"), extensions, removable })
 }
 
+/// The app's icon from an IPA file, as it is stored (often an Apple
+/// "CgBI" PNG, see `icons::uncrush`): the biggest PNG directly in the app
+/// that Info.plist names as an icon (CFBundleIcons, also ~ipad,
+/// CFBundleIconFiles, CFBundleIconFile), else one called AppIcon… or Icon….
+/// Apps whose icon is only in Assets.car have none here.
+pub fn icon(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|_| "This file is not an IPA.".to_string())?;
+    let info_name = zip.file_names()
+        .find(|n| n.starts_with("Payload/") && n.ends_with(".app/Info.plist") && n.matches('/').count() == 2)
+        .ok_or("This IPA has no app in Payload/.")?.to_string();
+    let dir = info_name.trim_end_matches("Info.plist").to_string();
+    let mut data = Vec::new();
+    zip.by_name(&info_name).map_err(|e| e.to_string())?.take(1 << 20).read_to_end(&mut data).map_err(|e| e.to_string())?;
+    let info = plist::from_bytes::<Value>(&data).ok().and_then(Value::into_dictionary).unwrap_or_default();
+    let mut names: Vec<String> = Vec::new();
+    let mut add = |v: Option<&Value>| match v {
+        Some(Value::String(s)) => names.push(s.trim_end_matches(".png").to_string()),
+        Some(Value::Array(list)) => names.extend(list.iter().filter_map(Value::as_string)
+            .map(|s| s.trim_end_matches(".png").to_string())),
+        _ => {}
+    };
+    for key in ["CFBundleIcons", "CFBundleIcons~ipad"] {
+        let primary = info.get(key).and_then(Value::as_dictionary).and_then(|d| d.get("CFBundlePrimaryIcon"))
+            .and_then(Value::as_dictionary);
+        add(primary.and_then(|p| p.get("CFBundleIconFiles")));
+        add(primary.and_then(|p| p.get("CFBundleIconName")));
+    }
+    add(info.get("CFBundleIconFiles"));
+    add(info.get("CFBundleIconFile"));
+    names.retain(|n| !n.is_empty());
+    let pngs: Vec<(String, u64)> = (0..zip.len()).filter_map(|i| {
+        let f = zip.by_index_raw(i).ok()?;
+        let leaf = f.name().strip_prefix(&dir)?;
+        (!leaf.contains('/') && leaf.to_ascii_lowercase().ends_with(".png")).then(|| (f.name().to_string(), f.size()))
+    }).collect();
+    let leaf = |n: &str| n.rsplit('/').next().unwrap_or("").to_string();
+    let named = |n: &&(String, u64)| names.iter().any(|base| leaf(&n.0).starts_with(base.as_str()));
+    let guessed = |n: &&(String, u64)| leaf(&n.0).starts_with("AppIcon") || leaf(&n.0).starts_with("Icon");
+    let best = pngs.iter().filter(named).filter(|p| p.1 <= 2 << 20).max_by_key(|p| p.1)
+        .or_else(|| pngs.iter().filter(guessed).filter(|p| p.1 <= 2 << 20).max_by_key(|p| p.1))
+        .ok_or("no icon file in the app")?;
+    let mut bytes = Vec::new();
+    zip.by_name(&best.0).map_err(|e| e.to_string())?.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
 impl Ipa {
     /// Reads an IPA. Only what signing changes or reads is kept in memory
     /// (Mach-O files, plists, profiles, symlinks); every other file is hashed

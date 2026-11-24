@@ -18,7 +18,8 @@ All are permissive. Generated with
 | CDLA-Permissive-2.0 (`webpki-roots` certificate data) | 2 |
 
 Main ones: `tokio`, `reqwest`, `rustls`, `ring`, `webpki-roots`,
-`tokio-tungstenite`, `plist`, `serde`, `zip`, `image` (icon and screenshot thumbnails), RustCrypto (`sha1`, `sha2`, `hmac`,
+`tokio-tungstenite`, `plist`, `serde`, `zip`, `image` (icon and screenshot thumbnails), `flate2`
+(the CgBI icons Xcode puts in apps), RustCrypto (`sha1`, `sha2`, `hmac`,
 `hkdf`, `pbkdf2`, `aes`, `cbc`, `aes-gcm`, `chacha20poly1305`, `rsa`),
 dalek (`ed25519-dalek`, `x25519-dalek`), `num-bigint`, `uuid`, `libc` (signals
 for the supervisor). Each crate's

@@ -147,13 +147,34 @@ pub fn new_identifier(original: &str, team: &str) -> String {
     if original.ends_with(&format!(".{team}")) { original.to_string() } else { format!("{original}.{team}") }
 }
 
+/// "New App ID": the app's own identifier (`new_identifier`; when its App ID
+/// is left from an earlier install, that one is taken again), unless an app
+/// on the iPhone is installed under it (another app that reused it, or a
+/// copy of this one): then the first of `original`2, 3… that none is, so a
+/// new install never takes another app's place.
+fn fresh_identifier(original: &str, team: &str, on_device: &[String]) -> String {
+    let own = new_identifier(original, team);
+    if !on_device.contains(&own) {
+        return own;
+    }
+    let base = own.strip_suffix(&format!(".{team}")).unwrap_or(&own).to_string();
+    (2..).map(|n| format!("{base}{n}.{team}")).find(|id| !on_device.contains(id)).unwrap_or(own)
+}
+
+/// The identifiers of the apps on the iPhone.
+async fn device_ids(session: &Session) -> Result<Vec<String>, String> {
+    Ok(services::installed_apps(session).await?.iter()
+        .filter_map(|d| d.get("CFBundleIdentifier").and_then(Value::as_string).map(str::to_string)).collect())
+}
+
 /// Asks the user to pick one of `options` (title, message, options).
 pub type Asker = dyn Fn(String, String, Vec<String>) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync;
 
 /// App IDs chosen on the install sheet.
 #[derive(Clone, Default)]
 pub struct Reuse {
-    /// The App ID (of an app no longer on the iPhone) the app takes.
+    /// The App ID the app takes (an app the iPhone has under it is
+    /// replaced). None: a new App ID, see `fresh_identifier`.
     pub pick: Option<String>,
     /// Extensions also take unused App IDs under the app's.
     pub extensions: bool,
@@ -224,8 +245,7 @@ async fn fit_app_ids(ctx: &Context<'_>, apps: &[&bundle::Bundle], main: &bundle:
         return Ok(());
     }
     status("Looking for App IDs to reuse".into());
-    let on_device: Vec<String> = services::installed_apps(ctx.session).await?.iter()
-        .filter_map(|d| d.get("CFBundleIdentifier").and_then(Value::as_string).map(str::to_string)).collect();
+    let on_device = device_ids(ctx.session).await?;
     let in_use = |id: &str| on_device.iter().any(|d| id == d || id.starts_with(&format!("{d}.")));
     let taken: Vec<String> = ids.values().cloned().collect();
     let mut free: Vec<&AppId> = existing.iter()
@@ -316,7 +336,7 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: Vec<u8>, opts: &Opti
     let main = ipa.main_app()?;
     let mut apps: Vec<&bundle::Bundle> = bundles.iter().filter(|b| b.kind != Kind::Framework).collect();
     apps.sort_by_key(|b| b.depth());
-    let main_new = ctx.previous.map(|(id, ids)| ids.get(&main.dir).cloned().unwrap_or_else(|| id.to_string()))
+    let mut main_new = ctx.previous.map(|(id, ids)| ids.get(&main.dir).cloned().unwrap_or_else(|| id.to_string()))
         .or_else(|| ctx.reuse.pick.clone())
         .unwrap_or_else(|| new_identifier(&main.id, team));
     let mut ids = identifiers(&apps, &main, &main_new, ctx.previous.map(|(_, ids)| ids));
@@ -325,6 +345,15 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: Vec<u8>, opts: &Opti
     portal.ensure_device(team, ctx.udid, ctx.device_name).await.map_err(|e| e.to_string())?;
     status("App IDs".into());
     let existing = portal.app_ids(team).await.map_err(|e| e.to_string())?;
+    // A new App ID whose identifier exists: is an app installed under it?
+    if ctx.previous.is_none() && ctx.reuse.pick.is_none() && existing.iter().any(|a| a.identifier == main_new) {
+        let fresh = fresh_identifier(&main.id, team, &device_ids(ctx.session).await?);
+        if fresh != main_new {
+            logf!("install: an app on the iPhone is installed under {main_new}; {} gets {fresh}", main.name);
+            main_new = fresh;
+            ids = identifiers(&apps, &main, &main_new, None);
+        }
+    }
     fit_app_ids(ctx, &apps, &main, &mut ids, &existing, status).await?;
     status("Signing certificate".into());
     let cert = certificate(&portal, team, ctx.ask).await?;
@@ -484,11 +513,10 @@ pub async fn refresh_profiles(portal: &Portal<'_>, team: &str, udid: &str, devic
 {
     status("Checking the certificate, App IDs and apps".into());
     let (cert, device, existing, on_device) = tokio::join!(portal.certificate(team),
-        portal.ensure_device(team, udid, device_name), portal.app_ids(team), services::installed_apps(session));
+        portal.ensure_device(team, udid, device_name), portal.app_ids(team), device_ids(session));
     let (cert, existing) = (cert.map_err(|e| e.to_string())?, existing.map_err(|e| e.to_string())?);
     device.map_err(|e| e.to_string())?;
-    let on_device: Vec<String> = on_device?.iter()
-        .filter_map(|d| d.get("CFBundleIdentifier").and_then(Value::as_string).map(str::to_string)).collect();
+    let on_device = on_device?;
     // Which App IDs each app needs, or why it cannot be refreshed this way.
     let plans: Vec<Result<Vec<&AppId>, String>> = entries.iter().map(|e| {
         if !on_device.contains(&e.bundle_id) {
@@ -702,6 +730,17 @@ mod tests {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert!(String::from_utf8_lossy(&out.stdout).contains("OU = TEAMID1234")
             || String::from_utf8_lossy(&out.stdout).contains("OU=TEAMID1234"));
+    }
+
+    #[test]
+    fn new_app_ids_never_take_an_apps_place() {
+        let on = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(fresh_identifier("com.a.b", "T1", &on(&[])), "com.a.b.T1");
+        // Its own App ID, free again: taken again.
+        assert_eq!(fresh_identifier("com.a.b", "T1", &on(&["com.x.y.T1"])), "com.a.b.T1");
+        // Another app (or a copy) is installed under it.
+        assert_eq!(fresh_identifier("com.a.b", "T1", &on(&["com.a.b.T1"])), "com.a.b2.T1");
+        assert_eq!(fresh_identifier("com.a.b.T1", "T1", &on(&["com.a.b.T1", "com.a.b2.T1"])), "com.a.b3.T1");
     }
 
     #[test]
