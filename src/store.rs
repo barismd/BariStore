@@ -536,8 +536,9 @@ fn directory_names(dir: &[u8]) -> Vec<String> {
 
 /// Downloads `v` into ~/.baristore/ipas/, reusing a complete earlier copy.
 pub async fn download(v: &Version, progress: &(dyn Fn(u64, u64) + Send + Sync)) -> Result<std::path::PathBuf, String> {
+    use crate::hash::Sha256;
     use futures_util::StreamExt;
-    use sha2::{Digest, Sha256};
+    use sha2::Digest;
     use std::io::Write;
     let dir = state::path("ipas");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

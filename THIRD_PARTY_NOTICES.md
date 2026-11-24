@@ -7,7 +7,7 @@ code is copied into it.
 
 All are permissive. Generated with
 `cargo tree -e normal --target aarch64-unknown-linux-musl --format '{p} {l}'`
-(193 crates on 2026-11-21):
+(194 crates on 2026-11-24):
 
 | Licence | Crates |
 |---|---|
@@ -15,11 +15,12 @@ All are permissive. Generated with
 | Unicode-3.0 (ICU data via `url`/`idna`) | 18 |
 | BSD-3-Clause | 4 |
 | ISC / Apache-2.0 AND ISC (`ring`) | 3 |
+| Zlib (`zlib-rs`, flate2's deflate) | 1 |
 | CDLA-Permissive-2.0 (`webpki-roots` certificate data) | 2 |
 
 Main ones: `tokio`, `reqwest`, `rustls`, `ring`, `webpki-roots`,
-`tokio-tungstenite`, `plist`, `serde`, `zip`, `image` (icon and screenshot thumbnails), `flate2`
-(the CgBI icons Xcode puts in apps), RustCrypto (`sha1`, `sha2`, `hmac`,
+`tokio-tungstenite`, `plist`, `serde`, `zip`, `image` (icon and screenshot thumbnails, app icons the
+user picks), `flate2` with `zlib-rs` (the IPA's entries, the CgBI icons Xcode puts in apps), RustCrypto (`sha1`, `sha2`, `hmac`,
 `hkdf`, `pbkdf2`, `aes`, `cbc`, `aes-gcm`, `chacha20poly1305`, `rsa`),
 dalek (`ed25519-dalek`, `x25519-dalek`), `num-bigint`, `uuid`, `libc` (signals
 for the supervisor). Each crate's
@@ -45,7 +46,9 @@ publishes. Used to trust gsa.apple.com and to complete code-signing chains.
 | [SideStore/SideStore](https://github.com/SideStore/SideStore) | AGPL-3.0 | behaviour only: how it finds its signing certificate (ALTCertificateID, ALTCertificate.p12), its refresh (new profiles through misagent), its source format's beta tracks (`releaseChannels`) |
 | [FrizzleM/siboot](https://github.com/FrizzleM/siboot) | MIT (stated in Cargo.toml; no LICENSE file) | how Open Minis keeps a pairing alive (minis-bonjour, apple-player) |
 | [OpenMinis/OpenMinis](https://github.com/OpenMinis/OpenMinis) | GPL-3.0 | documented interface of the `minis-*` / `apple-*` commands (`apple-open` included); behaviour of the player sheet, of `apple-speak`'s audio session, of its browser (only http(s)/about/blob/minis navigations) and of where `/var/minis/shared` is mounted |
-| [LiveContainer/LiveContainer](https://github.com/LiveContainer/LiveContainer) | AGPL-3.0 | behaviour only: its `livecontainer://certificate?cert=…&password=…` import, that plain LiveContainer reads no pairing file, and that its ZSign opens a .p12 with OpenSSL 3 |
+| [LiveContainer/LiveContainer](https://github.com/LiveContainer/LiveContainer) | AGPL-3.0 | behaviour only: its `livecontainer://certificate?cert=…&password=…` import, its `livecontainer://install?url=…` (downloads an IPA into LiveContainer; plain HTTP allowed by its ATS settings) and `livecontainer://source?url=…` (adds an AltSource to its Sources tab) links, that plain LiveContainer reads no pairing file, and that its ZSign opens a .p12 with OpenSSL 3 |
+| [OpenMinis/ish-arm64](https://github.com/OpenMinis/ish-arm64) | GPL-3.0 | behaviour only: the HWCAP its kernel reports (kernel/exec.c), that its emulator runs the SHA-1/SHA-256/SHA-512 and CRC32 instructions natively (asbestos crypto.S), its uname release ("-ish") |
+| [RustCrypto/hashes](https://github.com/RustCrypto/hashes) | MIT OR Apache-2.0 | how its aarch64 backends drive the SHA-256/SHA-512 instructions (src/hash.rs has its own) |
 | [nanofuxion/Whetstone](https://github.com/nanofuxion/Whetstone) | MIT | what its JITProbe tests (RWX, RW→RX, MAP_JIT), to explain its result after JIT |
 | FrizzleM/SideInstaller | non-commercial | documented behaviour only: where SideStore / LiveContainer / AltStore read a pairing file; which client info Apple accepts (Oct–Nov 2026) |
 | StikDebug/StikDebug | AGPL-3.0 | behaviour only: pairing-file destination, which DDI and where from, the JIT flow and what universal.js / legacy.js do (reimplemented, not copied) |

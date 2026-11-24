@@ -4,7 +4,8 @@
 //! megabytes on slow hosts; the page then loads small copies from the
 //! iPhone itself. Screenshots must be shrunk: a 1290×2796 one takes 14 MB
 //! once decoded, and a page of them would take the web view's memory. The
-//! icon of an app added as an IPA comes from inside the IPA ("ipa:<file>").
+//! icon of an app added as an IPA comes from inside the IPA ("ipa:<file>");
+//! a picture the user chose as an app's icon from app-icons/ ("custom:<file>").
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -185,6 +186,38 @@ pub fn ipa_icon_url(path: &Path) -> String {
     format!("ipa:{}", path.file_name().unwrap_or_default().to_string_lossy())
 }
 
+/// Where the pictures the user chose as app icons are kept (the page sends
+/// them square, 512 px): an app signed again later (an update) keeps its icon.
+pub fn custom_dir() -> PathBuf {
+    state::path("app-icons")
+}
+
+/// The picture called `name` in app-icons/ (names BariStore made only).
+pub fn custom_icon(name: &str) -> Option<Vec<u8>> {
+    let ours = name.len() == 28 && name.ends_with(".png") && name[..24].bytes().all(|b| b.is_ascii_hexdigit());
+    ours.then(|| std::fs::read(custom_dir().join(name)).ok()).flatten()
+}
+
+pub fn custom_icon_url(name: &str) -> String {
+    format!("custom:{name}")
+}
+
+/// Keeps a picture the page sent as an app's icon, once it is known to be
+/// a PNG or JPEG of at most 2048 px; its name in app-icons/.
+pub fn save_custom_icon(bytes: &[u8]) -> Result<String, String> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    limits.max_alloc = Some(40 << 20);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
+    reader.limits(limits);
+    reader.decode().map_err(|_| "That picture cannot be read: choose a PNG or JPEG.".to_string())?;
+    let name = format!("{}.png", hex::encode(rand::random::<[u8; 12]>()));
+    std::fs::create_dir_all(custom_dir()).map_err(|e| e.to_string())?;
+    std::fs::write(custom_dir().join(&name), bytes).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
 /// The picture's bytes as they are: from the web, or the app icon inside
 /// an IPA BariStore keeps ("ipa:<file name in ipas/>").
 async fn original(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
@@ -194,6 +227,9 @@ async fn original(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> 
         }
         let ipa = state::path("ipas").join(name);
         return tokio::task::spawn_blocking(move || crate::sign::bundle::icon(&ipa)).await.map_err(|e| e.to_string())?;
+    }
+    if let Some(name) = url.strip_prefix("custom:") {
+        return custom_icon(name).ok_or_else(|| "no such icon".into());
     }
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("not a web address".into());

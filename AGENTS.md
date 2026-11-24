@@ -44,6 +44,44 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   zip directory). Extensions cannot take another app's App ID: iOS requires
   an extension's identifier to start with its app's. JIT (owner,
   2026-11-21): built in `src/device/jit.rs`.
+- Owner, 1.1.0: App icon (Choose a picture, Reset) and Custom App ID on the
+  install sheet; Install to LiveContainer on it (store app and added IPA,
+  shown when BariStore installed a LiveContainer, not on LiveContainer's
+  own page); Sources › Add to LiveContainer; My Apps › ••• › Turn on
+  Increased Memory Limit, Change icon, Use its own icon again.
+- Custom App ID: what is typed (letters, digits, '-', dots, one dot at
+  least) with ".TEAM" appended as BariStore's own are: an App ID belongs to
+  one developer everywhere. Apple refusing it says so.
+- App icons the user picks: the page makes the picture square (its
+  middle), 512 px, on white (iOS shows see-through parts black) and sends
+  it to /api/upload-icon; BariStore checks it decodes and keeps it in
+  app-icons/ (as `options.icon`, so updates and re-signs keep it; files no
+  installed app names go after an hour). Signing writes
+  BariStoreIcon60x60@2x/@3x and 76/83.5@2x~ipad PNGs into the app, names
+  them in CFBundleIcons(~ipad) CFBundlePrimaryIcon and drops
+  CFBundleIconName (the asset catalog's icon) and CFBundleIconFile(s);
+  alternate icons stay. Untested on device. `custom_icon` records the one
+  the app on the iPhone has (My Apps shows it, "custom:<file>").
+- Increased Memory Limit (and an icon) after the install (owner, 1.1.0:
+  "no re-download, no re-picking the IPA, no cache"): iOS takes the
+  entitlement from the app's code signature, never from its profile
+  (GetMoreRam's README: enable it, then reinstall), and no service gives
+  the installed bundle back, so a refresh cannot add it. Kept in the app's
+  options either way; with its IPA still in ipas/ (added IPAs while
+  installed, others for an hour) the app is signed again at once over
+  itself; without it, it comes with the next update (or Install again),
+  nothing is downloaded for it. An update and a full refresh keep
+  Increased Memory Limit once the app has it (`signing_options`); Replace
+  on the install sheet starts from the copy's options (memory, icon,
+  extensions; owner, 1.1.0: an update turned memory off).
+- Install to LiveContainer: `livecontainer://install?url=` (LiveContainer
+  LCAppListView.handleURL; its background URLSession downloads, ATS allows
+  any load) with the source's own download address for store apps; an
+  added IPA is served once from BariStore at
+  http://127.0.0.1:<port>/share/<128-bit random>/<file> (no page token,
+  web.rs `Share`), under the keep-alive, until one request got it all (2
+  min to start, 1 min without progress). `livecontainer://source?url=`
+  adds an AltSource to LiveContainer's own Sources tab. Untested on device.
 - Install sheet App IDs (owner, 1.0.2: a deleted app's own App ID showed
   "New App ID"; a newer build of an added IPA became a second app), best
   first: Replace each copy BariStore installed of the same app (original
@@ -65,6 +103,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
 - Cache (owner, 1.0.2: it piled up): after every task, at start and on a
   catalog refresh with no task running, ipas/ keeps only IPAs installed
   apps need and files from the last hour (an open install sheet, a retry);
+  Options › Clear cache deletes every IPA, added ones too (owner, 1.1.0: the
+  one just installed stayed with its size), those of the last hour only
+  when no task runs;
   pictures of apps no source lists go after each catalog refresh, and the
   oldest beyond 80 MB; baristore.log and server.out are cut to their last
   512 KB past 2 MB (they only ever grew).
@@ -227,11 +268,27 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   "Reading the app…", with Cancel. The server reads the body in 4 MiB pieces
   and writes each with `block_in_place`.
 - Signing speed (owner: a 140 MB app took very long): the IPA is unpacked
-  and hashed on up to four threads, page hashes are reused across the
-  signature-size rounds and computed on several threads, and the final check
-  compares only the Info.plist/CodeResources slots (it hashed every page a
-  second time). Output is byte-identical to before (CodeDirectory, code,
-  CodeResources compared on a zig-built arm64 test app).
+  and hashed on up to four threads, page hashes are computed on several
+  threads, and the final check compares only the Info.plist/CodeResources
+  slots (it hashed every page a second time).
+- Speed, 1.1.0 (owner: "Reading" of an added IPA took long, signing too):
+  Minis's emulator (OpenMinis/ish-arm64) runs the SHA-1/SHA-256/SHA-512 and
+  CRC32 instructions natively (asbestos crypto.S) but reports HWCAP 0x11f
+  (FP, ASIMD, AES, PMULL, atomics only), so every hash ran in emulated
+  software. The aarch64 build enables `+sha2,+crc` (.cargo/config.toml:
+  ring's SHA-256, crc32fast's zip CRC32) and src/hash.rs has SHA-1/256/384
+  on the instructions (SHA-512 chosen at run time: HWCAP, or uname's
+  "-ish"), same digests as RustCrypto (tests, qemu-aarch64): the IPA's
+  files, page hashes, download checks, the tunnel's HMAC-SHA384. flate2
+  inflates with zlib-rs (about 2× miniz_oxide under qemu). A signature is
+  one pass: its size is known first (the CMS has the same size whatever it
+  signs), so pages are hashed once and one RSA signature made (2–4 before).
+  Binaries of one bundle depth are signed side by side and hashed for
+  their parent's seal there; new entries are compressed side by side (one
+  small zip each, copied in raw). The task shows "Reading the app: N%".
+  zip directories are read through a BufReader (each read was a system
+  call). On a synthetic 113 MB app under qemu: 8.6 s → 5.5 s; the archive
+  matches 1.0.2's but for the re-signed binaries. Untested on device.
 - JIT's first run asks before downloading the disk image (~17 MB, sizes from
   the server's Content-Length). Owner, alpha.11: Husk (universal.js) got
   "JIT is on"; the result texts are "JIT is on for X." / "X started with
@@ -290,6 +347,17 @@ against a mock device, CSR and PKCS#12 with openssl (3.x and 1.1.1), signatures
 with rcodesign. **Device-verified (owner):** LocalDevVPN check, pairing (0.1.0); Apple sign-in
 with 2FA, signing and installing an app (0.10.0-alpha.3).
 Everything else: say "untested on device" until the owner confirms.
+Linux-verified for 1.1.0: hashes against RustCrypto (x86_64; aarch64 under
+qemu, instructions and software alike); a one-pass signature (load command,
+page hashes, special slots, CMS verified by OpenSSL); an app with a
+framework and a loose dylib signed, given a picture as icon, packed and read
+back (modes, CodeResources hashes, icon sizes, Info.plist); a share served
+whole and gone once dropped; the real server's icon upload (bad picture
+refused) and custom: icon; the page in Playwright against a mock server
+(Custom App ID with the team appended, icon chosen and sent, Replace
+starting with memory on, Install to LiveContainer offered and sent, Add to
+LiveContainer, Turn on Increased Memory Limit and Change icon with and
+without the IPA kept, Clear cache's words).
 Linux-verified for 1.0.2: the page in Playwright against a mock server
 (App ID choices: own free, own reused by another app, an installed copy,
 New on request, an added IPA over its installed copy, its icon in the sheet
@@ -315,6 +383,7 @@ later try; everything else failed by the watchdog bug above.
 
 `src/pairing` pairable host · `src/device` tunnel, TCP, XPC, services ·
 `src/apple` anisette, GrandSlam, portal · `src/sign` code signing ·
+`src/hash.rs` SHA-1/256/384 on the CPU's SHA instructions ·
 `src/install.rs` App IDs → profiles → sign → install → pairing file ·
 `src/store.rs` catalog · `src/icons.rs` icon cache · `src/app.rs` state/tasks ·
 `src/web.rs` + `ui/index.html` the page · `src/doctor.rs` report ·

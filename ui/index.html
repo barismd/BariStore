@@ -492,15 +492,17 @@ function listHtml() {
 function renderList() { shown = BATCH; const l = $("#list"); if (l) { l.innerHTML = listHtml(); hydrate(l); } }
 
 function sourcesSheet() {
+  const lc = hasLiveContainer();
   const rows = C.sources.map((s) => `<div class="row"><div class="grow"><div class="ell">${esc(s.name)}</div>
-      <div class="ell muted small">${esc(s.url)}</div>${s.error ? `<div class="note">${esc(s.error)}</div>` : ""}</div>
+      <div class="ell muted small">${esc(s.url)}</div>${s.error ? `<div class="note">${esc(s.error)}</div>` : ""}
+      ${lc ? `<button class="link small" style="padding:6px 0 0" data-url="${esc(s.url)}" onclick="lcSource(this.dataset.url)">Add to LiveContainer</button>` : ""}</div>
       <button class="pill quiet" data-url="${esc(s.url)}" data-name="${esc(s.name)}" onclick="removeSource(this.dataset.url, this.dataset.name)">Remove</button></div>`).join("");
   const suggested = (C.suggested || []).map((s) => `<div class="row"><div class="grow"><div class="ell">${esc(s.name)}</div>
       <div class="ell muted small">${esc(s.url)}</div></div>
       <button class="pill" data-url="${esc(s.url)}" onclick="addSource(this.dataset.url)">Add</button></div>`).join("");
   return {
     title: "Sources",
-    body: `<p class="muted small">AltSources (AltStore and SideStore format) whose apps appear in Featured.</p>
+    body: `<p class="muted small">AltSources (AltStore and SideStore format) whose apps appear in Featured.${lc ? " Add to LiveContainer gives one to LiveContainer's Sources too." : ""}</p>
       <h2>Add a source</h2>
       <input class="field" id="srcurl" type="url" autocapitalize="none" spellcheck="false" placeholder="https://example.com/apps.json">
       <button class="btn" onclick="addSource($('#srcurl').value)">Add source</button>
@@ -508,6 +510,11 @@ function sourcesSheet() {
       <div class="card">${rows || '<div class="empty">No sources.</div>'}</div>
       ${suggested ? `<h2>Suggested</h2><div class="card">${suggested}</div>` : ""}`,
   };
+}
+/** LiveContainer's own Sources tab takes the source: its apps then install into LiveContainer from there. */
+async function lcSource(url) {
+  const r = await act("lc_source", { url });
+  toast(r.message);
 }
 async function addSource(url) {
   const r = await act("source_add", { url: (url || "").trim() });
@@ -524,16 +531,36 @@ function removeSource(url, name) {
 let pickVersion = 0, opts = {};
 /** What the install sheet knows about the app's extensions: {state: "loading" | "ok" | "error", extensions, removable}. */
 let ipaInfo = null;
-/** reuse_id: the App ID choice the user tapped (null: the first one, see idChoices). */
+/** reuse_id: the App ID choice the user tapped (null: the first one, see idChoices); custom_id: one typed for
+ *  Custom App ID; icon: a picture BariStore keeps for the app's icon ("": the app's own), icon_url to show it. */
 function freshOpts() {
   return { remove_extensions: !!S.settings.remove_extensions, increased_memory: !!S.settings.increased_memory,
-           reuse_id: null, reuse_extensions: false };
+           reuse_id: null, reuse_extensions: false, custom_id: "", icon: "", icon_url: "" };
+}
+/** The app of the install sheet that is open: a store app, or an added IPA. */
+function sheetApp() { return sheet?.kind === "local" ? sheet.ipa : detail; }
+/** Taps an App ID choice. Replacing a copy BariStore installed takes its options over: Increased Memory Limit
+ *  once it has it (owner, 1.1.0: an update turned it off), its icon, Remove extensions. */
+function pickChoice(id) {
+  opts.reuse_id = id;
+  copyDefaults(sheetApp());
+  renderSheet();
+}
+function copyDefaults(app) {
+  const c = idChoice(app);
+  const copy = c?.replace && (S.installed || []).find((i) => i.bundle_id === c.id);
+  if (!copy) return;
+  opts.increased_memory = !!(copy.options.increased_memory || copy.increased_memory);
+  opts.remove_extensions = !!copy.options.remove_extensions;
+  opts.icon = copy.options.icon || "";
+  opts.icon_url = opts.icon ? "custom:" + opts.icon : "";
 }
 function openApp(key) {
   detail = C.apps.find((a) => a.key === key);
   if (!detail) return;
   pickVersion = 0;
   opts = freshOpts();
+  copyDefaults(detail);
   openSheet({ kind: "detail" });
   loadAppIds(true);
   loadIpaInfo();
@@ -577,7 +604,19 @@ function idChoices(app) {
       out.push({ id: a.identifier, reused: true, title: `Reuse ${a.name}`, note: a.identifier + until(a) });
     }
   }
+  out.push({ id: "custom", custom: true, title: "Custom App ID", note: "One you type, such as com.example.app" });
   return out;
+}
+/** A custom App ID as BariStore makes it (install.rs custom_identifier): the team appended; null when it is not one. */
+function customId(typed) {
+  const id = (typed || "").trim(), team = S.setup.team;
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(id)) return null;
+  return id.endsWith("." + team) ? id : id + "." + team;
+}
+function customIdNote() {
+  const full = customId(opts.custom_id);
+  return full ? `Installs as ${full}: an App ID belongs to one developer everywhere, so your team is added.`
+    : "Letters, digits, '-' and dots, such as com.example.app.";
 }
 /** The choice picked: the one tapped, else the first. */
 function idChoice(app) {
@@ -587,7 +626,7 @@ function idChoice(app) {
 /** The App ID choice's "Extensions too": whether it can be on, and what to say. */
 function extensionsToo(choice) {
   const ids = S.app_ids, pick = choice?.id;
-  if (!pick || choice.replace || !ids?.list) return null;
+  if (!pick || choice.replace || choice.custom || !ids?.list) return null;
   const freeUnder = ids.list.filter((a) => !a.app && a.identifier.startsWith(pick + ".")).length;
   const known = ipaInfo?.state === "ok";
   const need = known ? (opts.remove_extensions ? ipaInfo.extensions - ipaInfo.removable : ipaInfo.extensions) : null;
@@ -600,21 +639,81 @@ function extensionsToo(choice) {
 /** Options and the App ID choice, the same for store apps and added IPAs (`app`: bundle_id, name). */
 function installOptionsHtml(app) {
   const ids = S.app_ids, choices = idChoices(app), picked = idChoice(app);
-  const choice = (c) => `<div class="choice ${c.id === picked.id ? "on" : ""}" data-id="${esc(c.id)}" onclick="opts.reuse_id=this.dataset.id;renderSheet()">
+  const choice = (c) => `<div class="choice ${c.id === picked.id ? "on" : ""}" data-id="${esc(c.id)}" onclick="pickChoice(this.dataset.id)">
       <div class="radio"></div><div class="grow"><div style="font-weight:600" class="ell">${esc(c.title)}</div>
       ${c.note ? `<div class="muted small ell">${esc(c.note)}</div>` : ""}${c.hint ? `<div class="muted small">${esc(c.hint)}</div>` : ""}
-      ${c.warn ? `<div class="note">${esc(c.warn)}</div>` : ""}</div></div>`;
+      ${c.warn ? `<div class="note">${esc(c.warn)}</div>` : ""}
+      ${c.custom && c.id === picked.id ? `<input class="field" id="customid" autocapitalize="none" autocorrect="off" spellcheck="false"
+        placeholder="com.example.app" value="${esc(opts.custom_id)}" onclick="event.stopPropagation()"
+        oninput="opts.custom_id=this.value;$('#customnote').textContent=customIdNote()">
+        <div class="muted small" id="customnote" style="margin-top:6px">${esc(customIdNote())}</div>` : ""}</div></div>`;
   const ext = extensionsToo(picked);
   const appIds = !S.setup.signed_in ? "" : `${choices.map(choice).join("")}
        ${!ids || !ids.list ? `<div class="muted small" style="margin-top:6px">${appIdsError ? esc(appIdsError) : "Loading your App IDs…"}</div>`
          : choices.some((c) => c.reused) ? "" : `<div class="muted small" style="margin-top:6px">No App ID of a deleted app is free to reuse.</div>`}
        ${ext && !ext.hidden ? `<div class="card" style="margin-top:8px">${toggleRow("opt:reuse_extensions", "Extensions too", `Extensions take free App IDs under the chosen one instead of new ones. ${esc(ext.note)}`, opts.reuse_extensions && ext.ok, !ext.ok)}</div>` : ""}`;
+  const shown = opts.icon ? { name: app.name, icon_url: opts.icon_url } : app;
   return `<h2>Options</h2>
     <div class="card">
       ${toggleRow("opt:remove_extensions", "Remove extensions", "Uses fewer App IDs (a free Apple ID has 10). Widgets and share sheets of this app stop working.", opts.remove_extensions)}
       ${toggleRow("opt:increased_memory", "Increased Memory Limit", `More memory for emulators and LiveContainer, where the ${DEVICE} supports it.`, opts.increased_memory)}
+      <div class="row">${iconHtml(shown)}<div class="grow"><div>App icon</div>
+        <div class="muted small">${opts.icon ? "Your picture" : "The app's own"}</div></div>
+        ${opts.icon ? `<button class="pill quiet" onclick="opts.icon='';opts.icon_url='';renderSheet()">Reset</button>` : ""}
+        <button class="pill quiet" onclick="chooseSheetIcon()">Choose</button></div>
     </div>
     ${appIds ? `<h2>App ID</h2>${appIds}` : ""}`;
+}
+/** The install sheet's App icon › Choose: the picture shows at once and goes with the install. */
+function chooseSheetIcon() {
+  const open = sheet;
+  pickIcon((r) => {
+    if (sheet !== open) return;
+    opts.icon = r.icon; opts.icon_url = r.url;
+    renderSheet();
+  });
+}
+/** Photos or Files for an app's icon. The page makes it square (the middle of the picture), 512 px, on white
+ *  (iOS shows an icon's see-through parts black), and BariStore keeps it; `done` gets {icon, url}. */
+function pickIcon(done) {
+  document.querySelectorAll("input.picker").forEach((i) => i.remove());
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = "image/*"; input.className = "picker";
+  document.body.appendChild(input);
+  input.addEventListener("change", async () => {
+    const file = input.files[0];
+    input.remove();
+    if (!file) return;
+    try {
+      const png = await squareIcon(file);
+      const r = await (await timed(T + "/api/upload-icon", { method: "POST", body: png }, 60000)).json();
+      if (r.ok) done(r); else toast(r.message);
+    } catch (e) { toast("That picture cannot be used."); }
+  });
+  input.addEventListener("cancel", () => input.remove());
+  input.click();
+}
+function squareIcon(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const side = Math.min(img.naturalWidth, img.naturalHeight), canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 512;
+      const g = canvas.getContext("2d");
+      g.fillStyle = "#fff"; g.fillRect(0, 0, 512, 512);
+      g.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 512, 512);
+      URL.revokeObjectURL(url);
+      canvas.toBlob((b) => b ? resolve(b) : reject(new Error("no PNG")), "image/png");
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("not a picture")); };
+    img.src = url;
+  });
+}
+/** Whether LiveContainer is on this iPhone (BariStore installed it): Install to LiveContainer is offered then
+ *  (`app`: not for LiveContainer itself). */
+function hasLiveContainer(app) {
+  return !app?.bundle_id?.startsWith("com.kdt.livecontainer")
+    && (S.installed || []).some((i) => i.kind === "livecontainer" || i.kind === "livecontainer+sidestore");
 }
 function detailSheet() {
   const a = detail;
@@ -636,7 +735,8 @@ function detailSheet() {
       ${installOptionsHtml(a)}
       ${a.description ? `<h2>About</h2><p class="muted small" style="white-space:pre-wrap">${esc(a.description.slice(0, 1500))}</p>` : ""}
       ${v && v.notes ? `<details><summary>Release notes</summary><p class="small muted" style="white-space:pre-wrap">${esc(v.notes)}</p></details>` : ""}`,
-    foot: `<button class="btn" onclick="install()">${installLabel(a, v?.version)}</button>`,
+    foot: `<button class="btn" onclick="install()">${installLabel(a, v?.version)}</button>
+      ${hasLiveContainer(a) ? `<button class="btn secondary" onclick="installToLc()">Install to LiveContainer</button>` : ""}`,
   };
 }
 /** The install button: Update or Install again when the new build goes over an installed one. */
@@ -651,15 +751,28 @@ function channelName(a, x) {
   if (x.channel) return x.channel[0].toUpperCase() + x.channel.slice(1);
   return a.versions.some((v) => v.source_url === x.source_url && v.channel) ? "Stable" : x.source;
 }
-/** What the install sheet sends: the App ID choice, "Extensions too" only when it is allowed. */
+/** What the install sheet sends: the App ID choice (a custom one as typed), "Extensions too" only when it is
+ *  allowed; null (and a word why) when the custom App ID is not one. */
 function installOpts(app) {
   const c = idChoice(app);
-  return { ...opts, reuse_id: c?.id || "", reuse_extensions: !!(opts.reuse_extensions && extensionsToo(c)?.ok) };
+  if (c?.custom && !customId(opts.custom_id)) { toast("Type a custom App ID such as com.example.app."); return null; }
+  return { remove_extensions: opts.remove_extensions, increased_memory: opts.increased_memory, icon: opts.icon,
+           reuse_id: c?.custom ? "" : c?.id || "", custom_id: c?.custom ? opts.custom_id.trim() : "",
+           reuse_extensions: !!(opts.reuse_extensions && extensionsToo(c)?.ok) };
 }
-function install() {
+async function install() {
+  const a = detail, o = installOpts(a);
+  if (!o) return;
+  closeSheet();
+  const r = await act("install", { key: a.key, version: pickVersion, name: a.name, ...o });
+  if (!r.ok) toast(r.message);
+}
+/** LiveContainer downloads the app from its source itself and keeps it in its own container: no App ID, no
+ *  signing here. */
+function installToLc() {
   const a = detail;
   closeSheet();
-  act("install", { key: a.key, version: pickVersion, name: a.name, ...installOpts(a) });
+  act("lc_install", { key: a.key, version: pickVersion, name: a.name });
 }
 
 // ---------------------------------------------------------------- add IPA
@@ -703,6 +816,8 @@ function uploadIpa(file) {
     opts = freshOpts();
     ipaInfo = { state: "ok", ...r.info };
     openSheet({ kind: "local", ipa: r });
+    copyDefaults(r);
+    renderSheet();
     loadAppIds(true);
   };
   xhr.onerror = () => { if (mine()) { closeSheet(); toast("The upload failed."); } };
@@ -730,13 +845,22 @@ function localSheet(ipa) {
     head: `${iconHtml({ name: ipa.name, icon_url: ipa.icon_url }, true)}<div class="grow"><div style="font-size:20px;font-weight:700" class="ell">${esc(ipa.name)}</div>
       <div class="muted small ell">${esc(ipa.bundle_id)}</div><div class="muted small">${esc(ipa.version)} · ${Math.round(ipa.size / 1e6)} MB</div></div>`,
     body: installOptionsHtml(ipa),
-    foot: `<button class="btn" onclick="installLocal()">${installLabel(ipa, ipa.version)}</button>`,
+    foot: `<button class="btn" onclick="installLocal()">${installLabel(ipa, ipa.version)}</button>
+      ${hasLiveContainer(ipa) ? `<button class="btn secondary" onclick="installLocalToLc()">Install to LiveContainer</button>` : ""}`,
   };
 }
-function installLocal() {
+async function installLocal() {
+  const ipa = sheet.ipa, o = installOpts(ipa);
+  if (!o) return;
+  closeSheet();
+  const r = await act("install_local", { path: ipa.path, name: ipa.name, ...o });
+  if (!r.ok) toast(r.message);
+}
+/** BariStore hands the IPA to LiveContainer from its own address and waits until it has it all. */
+function installLocalToLc() {
   const ipa = sheet.ipa;
   closeSheet();
-  act("install_local", { path: ipa.path, name: ipa.name, ...installOpts(ipa) });
+  act("lc_install_local", { path: ipa.path, name: ipa.name });
 }
 
 // ---------------------------------------------------------------- my apps
@@ -806,9 +930,8 @@ function appMenuSheet(id) {
   const i = (S.installed || []).find((x) => x.bundle_id === id) || { name: id, bundle_id: id, options: {}, ids: {} };
   const left = timeLeft(i.expires);
   const lc = i.kind === "livecontainer" || i.kind === "livecontainer+sidestore";
-  const memory = i.options.increased_memory
-    ? (i.increased_memory ? "On (in the app's profile)" : "Asked for, but Apple did not add it")
-    : (i.increased_memory ? "On (in the app's profile)" : "Off");
+  // increased_memory: in the app as signed; options: what its next signing asks Apple for.
+  const memory = i.increased_memory ? "On" : i.options.increased_memory ? "Asked for: comes with its next signing" : "Off";
   const line = (k, v) => `<div class="row"><div class="grow muted">${k}</div><div style="text-align:right;max-width:65%;word-break:break-all" class="small">${v}</div></div>`;
   const ids = Object.values(i.ids || {});
   // Its source's tracks (stable, nightly, alpha…), when it has more than one.
@@ -830,6 +953,11 @@ function appMenuSheet(id) {
         ${line(ids.length > 1 ? "App IDs" : "App ID", (ids.length ? ids : [i.bundle_id]).map(esc).join("<br>"))}
       </div>
       <div class="card">
+        ${i.increased_memory || i.options.increased_memory ? "" : `<div class="row"><button class="link" data-id="${esc(id)}" onclick="turnOnMemory(this.dataset.id)">Turn on Increased Memory Limit</button></div>`}
+        <div class="row"><button class="link" data-id="${esc(id)}" onclick="changeIcon(this.dataset.id)">Change icon</button></div>
+        ${i.custom_icon || i.options.icon ? `<div class="row"><button class="link" data-id="${esc(id)}" onclick="changeApp(this.dataset.id, { icon: '' }, 'its own icon')">Use its own icon again</button></div>` : ""}
+      </div>
+      <div class="card">
         <div class="row"><button class="link" data-id="${esc(id)}" data-name="${esc(i.name)}" onclick="closeSheet();act('refresh',{bundle_id:this.dataset.id,name:this.dataset.name})">Refresh</button></div>
         <div class="row"><button class="link" data-id="${esc(id)}" data-name="${esc(i.name)}" onclick="closeSheet();act('jit',{bundle_id:this.dataset.id,name:this.dataset.name})">Open with JIT</button></div>
         ${lc ? `<div class="row"><button class="link" data-id="${esc(id)}" data-name="${esc(i.name)}" onclick="closeSheet();act('lc_certificate',{bundle_id:this.dataset.id,name:this.dataset.name})">Give it the certificate</button></div>` : ""}
@@ -837,6 +965,24 @@ function appMenuSheet(id) {
         <div class="row"><button class="link bad" data-id="${esc(id)}" data-name="${esc(i.name)}" onclick="deleteApp(this.dataset.id, this.dataset.name)">Delete app</button></div>
       </div>`,
   };
+}
+/** My Apps › an app › Increased Memory Limit or its icon, after the install. Both are in the app's signature:
+ *  with its IPA still here BariStore signs it again at once (its data stays); without it, the change is kept for
+ *  its next signing, and nothing is downloaded for it. */
+function changeApp(id, change, what) {
+  const i = (S.installed || []).find((x) => x.bundle_id === id);
+  if (!i) return;
+  ask({ title: i.ipa ? `Sign ${i.name} again?` : `Keep for ${i.name}'s next update?`,
+    message: i.ipa ? `${i.name} is signed and installed again with ${what}. Its data and App IDs stay.`
+      : `iOS reads this from the app's signature, so ${i.name} must be signed again for it, and BariStore no longer has its IPA. It gets ${what} with its next update; Install again on its page applies it now.`,
+    ok: i.ipa ? "Sign again" : "Keep it", run: async () => {
+      const r = await act("app_options", { bundle_id: id, name: i.name, ...change });
+      if (!r.ok || r.message !== "started") toast(r.message);
+    } });
+}
+function turnOnMemory(id) { changeApp(id, { increased_memory: true }, "Increased Memory Limit"); }
+function changeIcon(id) {
+  pickIcon((r) => changeApp(id, { icon: r.icon }, "the new icon"));
 }
 async function setChannel(id, channel) {
   const r = await act("set_channel", { bundle_id: id, channel });
@@ -879,7 +1025,7 @@ function optionsView() {
       <div class="row"><div class="grow">BariStore</div><div class="muted">${esc(S.version)}</div></div>
       <div class="row"><button class="link" onclick="act('update')">Update BariStore</button></div>
       <div class="row"><button class="link" onclick="showLog()">Log</button></div>
-      <div class="row"><button class="link" onclick="ask({title:'Clear the cache?', message:'Deletes downloaded apps, icons and the copy of the catalog. Apps from the store are downloaded again when they are refreshed.', ok:'Clear cache', run:clearCache})">Clear cache${cacheBytes != null ? ` <span class="muted small">(${Math.round(cacheBytes / 1e6)} MB)</span>` : ""}</button></div>
+      <div class="row"><button class="link" onclick="ask({title:'Clear the cache?', message:'Deletes every IPA (downloaded and added), icons and the copy of the catalog. Installed apps stay. One signed again later is downloaded again; an added one must be added again.', ok:'Clear cache', run:clearCache})">Clear cache${cacheBytes != null ? ` <span class="muted small">(${Math.round(cacheBytes / 1e6)} MB)</span>` : ""}</button></div>
       <div class="row"><button class="link bad" onclick="ask({title:'Reset BariStore?', message:'BariStore forgets the Apple ID session, the pairing, sources, settings and its app list, and starts setup again. Apps stay on the ${DEVICE}.', ok:'Reset', danger:true, run:reset})">Reset BariStore</button></div>
       <div class="row"><button class="link bad" onclick="quit()">Quit BariStore</button></div>
     </div>

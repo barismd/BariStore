@@ -1,9 +1,13 @@
 //! The page: a tiny HTTP/1.1 server on 127.0.0.1 under a 128-bit random path
 //! (other apps and websites on the iPhone can reach a loopback port, but not
 //! guess the path), Host checked against the loopback (no DNS rebinding).
-//! Shown in Minis's browser sheet with minis-open.
+//! Shown in Minis's browser sheet with minis-open. A file handed to another
+//! app (Install to LiveContainer) has an address of its own, see `Share`.
 
 use serde_json::{json, Value as Json};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -17,6 +21,7 @@ const LOGO: &[u8] = include_bytes!("../assets/baristore.svg");
 /// Serves the page on 127.0.0.1:`port` under /`token`/ (both chosen by the
 /// supervisor, so a restarted server keeps the page's address).
 pub async fn serve(app: App, port: u16, token: &str) -> Result<(), String> {
+    let _ = PORT.set(port);
     let mut tries = 0;
     let listener = loop {
         match TcpListener::bind(("127.0.0.1", port)).await {
@@ -171,9 +176,31 @@ async fn handle(mut stream: TcpStream, app: App, prefix: &str, port: u16) -> std
     if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
         return respond(&mut stream, "403 Forbidden", "text/plain", b"").await;
     }
+    if let (Some(rest), "GET") = (path.strip_prefix("/share/"), method) {
+        return send_share(&mut stream, rest).await;
+    }
     let Some(route) = path.strip_prefix(prefix) else {
         return respond(&mut stream, "404 Not Found", "text/plain", b"").await;
     };
+    if method == "POST" && route.starts_with("/api/upload-icon") {
+        // A picture for an app's icon (the page sends it square, 512 px).
+        if length > 4 << 20 {
+            return respond(&mut stream, "413 Too Large", "text/plain", b"").await;
+        }
+        let mut body = buf[header_end..].to_vec();
+        while body.len() < length {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        let reply = match tokio::task::block_in_place(|| crate::icons::save_custom_icon(&body)) {
+            Ok(name) => json!({"ok": true, "icon": name, "url": crate::icons::custom_icon_url(&name)}),
+            Err(e) => json!({"ok": false, "message": e}),
+        };
+        return respond(&mut stream, "200 OK", "application/json", reply.to_string().as_bytes()).await;
+    }
     if method == "POST" && route.starts_with("/api/upload") {
         let reply = upload(&mut stream, &buf[header_end..], length).await;
         return respond(&mut stream, "200 OK", "application/json", reply.to_string().as_bytes()).await;
@@ -290,17 +317,113 @@ async fn upload(stream: &mut TcpStream, first: &[u8], length: usize) -> Json {
     }
 }
 
-fn reuse(r: &Json) -> crate::install::Reuse {
-    crate::install::Reuse {
-        pick: r.get("reuse_id").and_then(Json::as_str).filter(|s| !s.is_empty()).map(str::to_string),
-        extensions: r.get("reuse_extensions").and_then(Json::as_bool).unwrap_or(false),
+/// The port the page is served on (for the addresses of shared files).
+static PORT: OnceLock<u16> = OnceLock::new();
+
+/// What a share has sent: the bytes of its latest request, and whether one
+/// request got the whole file.
+#[derive(Default)]
+struct Sent {
+    bytes: AtomicU64,
+    whole: AtomicBool,
+}
+
+/// Shared files by their random id: the file and its size.
+type Shares = Mutex<HashMap<String, (std::path::PathBuf, u64, Arc<Sent>)>>;
+static SHARES: std::sync::LazyLock<Shares> = std::sync::LazyLock::new(Default::default);
+
+/// A file handed to another app on this iPhone by address (Install to
+/// LiveContainer: LiveContainer downloads it like any other IPA). Served at
+/// /share/<128-bit random>/<file name> to whoever asks 127.0.0.1 for it,
+/// without the page's token, until dropped.
+pub struct Share {
+    id: String,
+    name: String,
+    size: u64,
+    sent: Arc<Sent>,
+}
+
+impl Share {
+    pub fn new(path: &std::path::Path) -> Result<Share, String> {
+        let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+        let id = hex::encode(rand::random::<[u8; 16]>());
+        let sent = Arc::new(Sent::default());
+        SHARES.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), (path.to_path_buf(), size, sent.clone()));
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        Ok(Share { id, name, size, sent })
     }
+
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/share/{}/{}", PORT.get().copied().unwrap_or(0), self.id, self.name)
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn sent(&self) -> u64 {
+        self.sent.bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn done(&self) -> bool {
+        self.sent.whole.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Share {
+    fn drop(&mut self) {
+        SHARES.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+    }
+}
+
+/// Answers a share's address with the file, read a mebibyte at a time.
+async fn send_share(stream: &mut TcpStream, rest: &str) -> std::io::Result<()> {
+    use std::io::Read;
+    let id = rest.split('/').next().unwrap_or("");
+    let found = SHARES.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+    let Some((path, size, sent)) = found else {
+        return respond(stream, "404 Not Found", "text/plain", b"").await;
+    };
+    let mut file = std::fs::File::open(&path)?;
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {size}\r\n\
+                        Cache-Control: no-store\r\nConnection: close\r\n\r\n");
+    stream.write_all(head.as_bytes()).await?;
+    let mut piece = vec![0u8; 1 << 20];
+    let mut done = 0u64;
+    sent.bytes.store(0, Ordering::Relaxed);
+    while done < size {
+        let n = tokio::task::block_in_place(|| file.read(&mut piece))?;
+        if n == 0 {
+            break;
+        }
+        stream.write_all(&piece[..n]).await?;
+        done += n as u64;
+        sent.bytes.store(done, Ordering::Relaxed);
+    }
+    stream.flush().await?;
+    if done == size {
+        sent.whole.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// The install sheet's App ID choice: one picked from the list, or a
+/// custom one typed (checked, the team appended).
+fn reuse(app: &App, r: &Json) -> Result<crate::install::Reuse, String> {
+    let custom = s(r, "custom_id");
+    let pick = if custom.trim().is_empty() {
+        r.get("reuse_id").and_then(Json::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+    } else {
+        Some(app.custom_app_id(&custom)?)
+    };
+    Ok(crate::install::Reuse { pick, extensions: r.get("reuse_extensions").and_then(Json::as_bool).unwrap_or(false) })
 }
 
 fn options(r: &Json) -> Options {
     Options {
         remove_extensions: r.get("remove_extensions").and_then(Json::as_bool).unwrap_or(false),
         increased_memory: r.get("increased_memory").and_then(Json::as_bool).unwrap_or(false),
+        icon: s(r, "icon"),
     }
 }
 
@@ -327,6 +450,42 @@ pub fn percent_decode(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A share answers with the whole file while it lives, counts it, and
+    /// is gone once dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shares_a_file_once_asked() {
+        let path = std::env::temp_dir().join(format!("baristore-share-{}.ipa", std::process::id()));
+        let data: Vec<u8> = (0..(3 << 20) + 123).map(|i: u32| (i * 7 + i / 991) as u8).collect();
+        std::fs::write(&path, &data).unwrap();
+        let share = Share::new(&path).unwrap();
+        assert!(share.url().ends_with(&format!("/share/{}/{}", share.id, share.name)));
+        let fetch = |rest: String| async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                send_share(&mut stream, &rest).await.unwrap();
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let mut got = Vec::new();
+            client.read_to_end(&mut got).await.unwrap();
+            server.await.unwrap();
+            got
+        };
+        let got = fetch(format!("{}/x.ipa", share.id)).await;
+        let end = got.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let head = String::from_utf8_lossy(&got[..end]);
+        assert!(head.starts_with("HTTP/1.1 200") && head.contains(&format!("Content-Length: {}", data.len())), "{head}");
+        assert!(got[end..] == data[..]);
+        assert!(share.done() && share.sent() == data.len() as u64);
+        let id = share.id.clone();
+        drop(share);
+        assert!(fetch(format!("{id}/x.ipa")).await.starts_with(b"HTTP/1.1 404"));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn percent_decoding() {
         assert_eq!(super::percent_decode("https%3A%2F%2Fa.b%2Fx%20y.png"), "https://a.b/x y.png");
@@ -389,7 +548,8 @@ async fn action(app: &App, r: &Json) -> Json {
         "install" => {
             let key = s(r, "key");
             let version = r.get("version").and_then(Json::as_u64).unwrap_or(0) as usize;
-            let (opts, reuse) = (options(r), reuse(r));
+            let reuse = match reuse(app, r) { Ok(reuse) => reuse, Err(e) => return fail(e) };
+            let opts = options(r);
             let title = s(r, "name");
             app.spawn_kept(&format!("Installing {title}"), Some(r.clone()),
                            move |a| async move { a.install_version(&key, version, opts, reuse).await });
@@ -397,9 +557,45 @@ async fn action(app: &App, r: &Json) -> Json {
         }
         "install_local" => {
             let path = s(r, "path");
-            let (opts, reuse) = (options(r), reuse(r));
+            let reuse = match reuse(app, r) { Ok(reuse) => reuse, Err(e) => return fail(e) };
+            let opts = options(r);
             app.spawn_kept(&format!("Installing {}", s(r, "name")), Some(r.clone()),
                            move |a| async move { a.install_local(&path, opts, reuse).await });
+            ok("started")
+        }
+        "lc_install" => {
+            let key = s(r, "key");
+            let version = r.get("version").and_then(Json::as_u64).unwrap_or(0) as usize;
+            app.spawn(&format!("{} to LiveContainer", s(r, "name")), Some(r.clone()),
+                      move |a| async move { a.lc_install(&key, version).await });
+            ok("started")
+        }
+        "lc_install_local" => {
+            let path = s(r, "path");
+            app.spawn_kept(&format!("{} to LiveContainer", s(r, "name")), Some(r.clone()),
+                           move |a| async move { a.lc_install_local(&path).await });
+            ok("started")
+        }
+        "lc_source" => match app.lc_source(&s(r, "url")).await { Ok(m) => ok(&m), Err(e) => fail(e) },
+        "app_options" => {
+            let (id, name) = (s(r, "bundle_id"), s(r, "name"));
+            let memory = r.get("increased_memory").and_then(Json::as_bool).unwrap_or(false);
+            let icon = r.get("icon").and_then(Json::as_str);
+            match app.set_app_options(&id, memory, icon) {
+                Ok(true) => {
+                    app.spawn_kept(&format!("Signing {name} again"), Some(json!({"action": "sign_again", "bundle_id": id,
+                        "name": name})), move |a| async move { a.sign_again(&id).await });
+                    ok("started")
+                }
+                Ok(false) => ok(&format!("Saved: {name} gets it with its next update. BariStore no longer has its IPA \
+                                          and downloads nothing for this.")),
+                Err(e) => fail(e),
+            }
+        }
+        "sign_again" => {
+            let id = s(r, "bundle_id");
+            app.spawn_kept(&format!("Signing {} again", s(r, "name")), Some(r.clone()),
+                           move |a| async move { a.sign_again(&id).await });
             ok("started")
         }
         "clear_cache" => ok(&app.clear_cache()),

@@ -6,9 +6,10 @@
 use aes::cipher::generic_array::{typenum::U16, GenericArray};
 use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncrypt, KeyInit, KeyIvInit};
 use hmac::{Hmac, Mac};
-use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha384};
+use sha2::Digest;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::hash::{Sha1, Sha256, Sha384};
 
 const VERSION: [u8; 2] = [3, 3];
 const CT_CCS: u8 = 20;

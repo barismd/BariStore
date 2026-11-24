@@ -1,6 +1,6 @@
 [package]
 name = "baristore"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 description = "An app store for iPhone and iPad that runs in Open Minis: pairs, signs and installs on the device itself"
 license = "MIT"
@@ -19,8 +19,9 @@ base64 = "0.22"
 hex = "0.4"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
-sha1 = "0.10"
-sha2 = "0.10"
+# "compress": the software rounds src/hash.rs falls back to.
+sha1 = { version = "0.10", features = ["compress"] }
+sha2 = { version = "0.10", features = ["compress"] }
 hmac = "0.12"
 hkdf = "0.12"
 pbkdf2 = "0.12"
@@ -37,8 +38,9 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-# Raw deflate for the icons Xcode stores in apps (CgBI PNGs).
-flate2 = "1"
+# Raw deflate for the icons Xcode stores in apps (CgBI PNGs). zlib-rs: the
+# zip entries inflate about twice as fast as with miniz_oxide (emulated CPU).
+flate2 = { version = "1", features = ["zlib-rs"] }
 libc = "0.2"
 
 [profile.release]

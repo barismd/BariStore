@@ -111,7 +111,7 @@ impl App {
                 i.setup.team_name = parts.next().unwrap_or("").trim().into();
             }
         }
-        prune_ipas();
+        prune_files();
         app
     }
 
@@ -128,7 +128,14 @@ impl App {
             "pairing_waiting": i.pairing_waiting,
             "pairing_keepalive": i.pairing_keepalive,
             "settings": state::settings(),
-            "installed": install::installed(),
+            // With the icon the app on the iPhone has, and whether its IPA
+            // is still here (a change to it can be signed in at once).
+            "installed": install::installed().into_iter().map(|e| {
+                let mut v = json!(e);
+                v["icon_url"] = json!(e.shown_icon());
+                v["ipa"] = json!(std::path::Path::new(&e.ipa_path).is_file());
+                v
+            }).collect::<Vec<_>>(),
             "updates": updates,
             "device_apps": i.device_apps,
             "app_ids": i.app_ids,
@@ -202,7 +209,7 @@ impl App {
             logf!("task: start {title}");
             let result = job(app.clone()).await;
             // Before the next task can start: IPAs this one left unneeded.
-            prune_ipas();
+            prune_files();
             let mut i = app.inner.lock().unwrap();
             let t = i.task.get_or_insert_with(Task::default);
             t.done = true;
@@ -469,7 +476,7 @@ impl App {
         let icons: Vec<String> = catalog.iter().map(|a| a.icon.clone()).collect();
         // Every picture the page may still show; the cache drops the rest.
         let mut keep: Vec<String> = catalog.iter().flat_map(|a| a.screenshots.iter().chain([&a.icon])).cloned().collect();
-        keep.extend(install::installed().into_iter().map(|i| i.icon_url));
+        keep.extend(install::installed().into_iter().flat_map(|i| [i.shown_icon(), i.icon_url]));
         // The first screenshots Featured shows (its order: by name).
         let mut shown: Vec<&store::App> = catalog.iter().filter(|a| !a.screenshots.is_empty()).collect();
         shown.sort_by_key(|a| a.name.to_lowercase());
@@ -482,7 +489,7 @@ impl App {
             i.refreshing = false;
         }
         if let Ok(_idle) = self.busy.try_lock() {
-            prune_ipas();
+            prune_files();
         }
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || crate::icons::prune(&keep)).await;
@@ -638,7 +645,7 @@ impl App {
             app.progress(format!("Downloading {} of {} MB", done / 1_000_000, total.max(done) / 1_000_000), pct);
         }).await?;
         logf!("install: downloaded in {:.1} s", started.elapsed().as_secs_f64());
-        let bytes = std::fs::read(&ipa_path).map_err(|e| e.to_string())?;
+        let bytes = tokio::task::block_in_place(|| std::fs::read(&ipa_path)).map_err(|e| e.to_string())?;
         let mut installed = Installed {
             original_id: entry.bundle_id.clone(), name: entry.name.clone(), version: v.version.clone(),
             source_url: v.url.clone(), ipa_path: ipa_path.to_string_lossy().into(), icon_url: entry.icon.clone(),
@@ -711,6 +718,7 @@ impl App {
         entry.increased_memory = prepared.increased_memory;
         entry.team = team.id.clone();
         entry.expires = prepared.expires;
+        entry.custom_icon = opts.icon.clone();
         let opts_memory = opts.increased_memory;
         entry.options = opts;
         let started = std::time::Instant::now();
@@ -812,7 +820,7 @@ impl App {
             }
             let name = entry.name.clone();
             match self.resign(&session, &apple, entry).await {
-                Ok(()) => done += 1,
+                Ok(_) => done += 1,
                 Err(err) => {
                     logf!("refresh: {name}: {err}");
                     failed.push(format!("{name}: {err}"));
@@ -832,9 +840,9 @@ impl App {
     }
 
     /// The full refresh: signed and installed again from the cached IPA
-    /// (downloaded again when the cache was cleared).
+    /// (downloaded again when the cache was cleared), with its options.
     async fn resign(&self, session: &Session, apple: &(gsa::GrandSlam, gsa::Account), mut entry: Installed)
-        -> Result<(), String>
+        -> Result<String, String>
     {
         if !std::path::Path::new(&entry.ipa_path).is_file() {
             // Cleared from the cache: download it again from where it came from.
@@ -853,9 +861,9 @@ impl App {
             }).await?;
             entry.ipa_path = path.to_string_lossy().into();
         }
-        let bytes = std::fs::read(&entry.ipa_path).map_err(|e| e.to_string())?;
-        let opts = entry.options.clone();
-        self.sign_and_install(session, apple, bytes, opts, install::Reuse::default(), entry).await.map(|_| ())
+        let bytes = tokio::task::block_in_place(|| std::fs::read(&entry.ipa_path)).map_err(|e| e.to_string())?;
+        let opts = entry.signing_options();
+        self.sign_and_install(session, apple, bytes, opts, install::Reuse::default(), entry).await
     }
 
     /// The catalog's offer for an installed app: the same app from the same
@@ -877,7 +885,7 @@ impl App {
         install::installed().iter().filter_map(|e| {
             let (_, _, v) = self.offer(e)?;
             (!v.version.is_empty() && v.version != e.version).then(|| json!({
-                "bundle_id": e.bundle_id, "name": e.name, "icon_url": e.icon_url, "from": e.version, "to": v.version,
+                "bundle_id": e.bundle_id, "name": e.name, "icon_url": e.shown_icon(), "from": e.version, "to": v.version,
             }))
         }).collect()
     }
@@ -901,8 +909,8 @@ impl App {
         let name = entry.name.clone();
         entry.version = v.version.clone();
         entry.source_url = v.url.clone();
-        let bytes = std::fs::read(&entry.ipa_path).map_err(|e| e.to_string())?;
-        let opts = entry.options.clone();
+        let bytes = tokio::task::block_in_place(|| std::fs::read(&entry.ipa_path)).map_err(|e| e.to_string())?;
+        let opts = entry.signing_options();
         self.sign_and_install(&session, &apple, bytes, opts, install::Reuse::default(), entry).await?;
         Ok(format!("{name} is updated to {}.", v.version))
     }
@@ -925,6 +933,101 @@ impl App {
         } else {
             Err(failed.join("\n"))
         }
+    }
+
+    /// The install sheet's custom App ID: what was typed, checked, with the
+    /// team appended.
+    pub fn custom_app_id(&self, typed: &str) -> Result<String, String> {
+        install::custom_identifier(typed, &self.team()?.id)
+    }
+
+    /// My Apps › an app › Increased Memory Limit or Change icon. Both live in
+    /// the app's signature, so they are kept in its options (every later
+    /// signing applies them: an update, a full refresh, Install again).
+    /// Whether BariStore still has its IPA to sign it again now; nothing is
+    /// downloaded for this.
+    pub fn set_app_options(&self, bundle_id: &str, memory: bool, icon: Option<&str>) -> Result<bool, String> {
+        let mut list = install::installed();
+        let e = list.iter_mut().find(|i| i.bundle_id == bundle_id).ok_or("BariStore did not install this app.")?;
+        if let Some(icon) = icon {
+            if !icon.is_empty() && crate::icons::custom_icon(icon).is_none() {
+                return Err("The icon you chose is gone: choose it again.".into());
+            }
+            e.options.icon = icon.to_string();
+        }
+        e.options.increased_memory |= memory;
+        let kept = std::path::Path::new(&e.ipa_path).is_file();
+        install::save_installed(&list);
+        Ok(kept)
+    }
+
+    /// Signs an app again from the IPA BariStore still has, with its options,
+    /// and installs it over itself: its data and App IDs stay.
+    pub async fn sign_again(&self, bundle_id: &str) -> Result<String, String> {
+        let entry = install::installed().into_iter().find(|i| i.bundle_id == bundle_id)
+            .ok_or("BariStore did not install this app.")?;
+        if !std::path::Path::new(&entry.ipa_path).is_file() {
+            return Err("BariStore no longer has this app's IPA. The change is kept for its next update.".into());
+        }
+        let (session, apple) = self.ready_to_install().await?;
+        self.resign(&session, &apple, entry).await
+    }
+
+    /// Install to LiveContainer, for an app from a source: LiveContainer
+    /// downloads the IPA itself (livecontainer://install?url=, its
+    /// LCAppListView.handleURL) and keeps the app in its own container.
+    pub async fn lc_install(&self, key: &str, version: usize) -> Result<String, String> {
+        let (name, url) = {
+            let i = self.inner.lock().unwrap();
+            let app = i.catalog.iter().find(|a| a.key == key).ok_or("This app is no longer in the store.")?;
+            (app.name.clone(), app.versions.get(version).ok_or("This version is no longer offered.")?.url.clone())
+        };
+        self.step("Opening LiveContainer");
+        open_livecontainer(&format!("livecontainer://install?url={}", install::percent_encode(&url))).await?;
+        Ok(format!("LiveContainer downloads and installs {name}."))
+    }
+
+    /// Install to LiveContainer, for an added IPA: BariStore hands the file
+    /// to LiveContainer from its own address (a path made for this one
+    /// file) and stays until it was all sent.
+    pub async fn lc_install_local(&self, path: &str) -> Result<String, String> {
+        let path = std::path::Path::new(path);
+        if path.parent() != Some(state::path("ipas").as_path()) {
+            return Err("That file is not one BariStore received.".into());
+        }
+        let info = crate::sign::bundle::peek(path)?;
+        let share = crate::web::Share::new(path)?;
+        self.step("Opening LiveContainer");
+        open_livecontainer(&format!("livecontainer://install?url={}", install::percent_encode(&share.url()))).await?;
+        self.step(format!("Waiting for LiveContainer to ask for {}", info.name));
+        let mut last = (0, std::time::Instant::now());
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let (sent, size) = (share.sent(), share.size());
+            if share.done() {
+                break;
+            }
+            if sent != last.0 {
+                last = (sent, std::time::Instant::now());
+                self.progress(format!("LiveContainer is receiving {}: {} of {} MB", info.name, sent / 1_000_000,
+                                      size / 1_000_000), (sent * 100 / size.max(1)) as u32);
+            } else if last.1.elapsed() > std::time::Duration::from_secs(if sent == 0 { 120 } else { 60 }) {
+                return Err(if sent == 0 {
+                    "LiveContainer did not ask for the app. Open LiveContainer, then try again.".into()
+                } else {
+                    "LiveContainer stopped receiving the app. Try again.".into()
+                });
+            }
+        }
+        logf!("livecontainer: {} sent ({} MB)", info.name, share.size() / 1_000_000);
+        Ok(format!("LiveContainer received {} and installs it now.", info.name))
+    }
+
+    /// Sources › a source › LiveContainer: added to LiveContainer's own
+    /// Sources tab (livecontainer://source?url=, LCAltStoreSourcesView).
+    pub async fn lc_source(&self, url: &str) -> Result<String, String> {
+        open_livecontainer(&format!("livecontainer://source?url={}", install::percent_encode(url))).await?;
+        Ok("LiveContainer adds the source to its Sources.".into())
     }
 
     /// Whether the release BariStore updates from holds a build other than
@@ -1127,6 +1230,7 @@ impl App {
         }
         let _ = std::fs::remove_dir_all(state::path("ipas"));
         let _ = std::fs::remove_dir_all(state::path("icons"));
+        let _ = std::fs::remove_dir_all(crate::icons::custom_dir());
         if let Ok(dir) = std::fs::read_dir(state::home()) {
             for e in dir.flatten() {
                 if e.file_name().to_string_lossy().starts_with("anisette-") {
@@ -1140,12 +1244,14 @@ impl App {
         i.catalog = store::cached_catalog();
     }
 
-    /// Options › Clear cache: icons, the catalog copy and downloaded IPAs.
-    /// IPAs of installed apps that came from a source are downloaded again
-    /// when they are refreshed; IPAs added by hand are kept.
+    /// Options › Clear cache: icons, the catalog copy and every IPA, added
+    /// ones too (owner, 1.1.0: the IPA just installed stayed and its size
+    /// with it). An app signed again later (a new certificate) is downloaded
+    /// again; an added one must be added again. While a task runs, the IPAs
+    /// of the last hour stay (it may be using one).
     pub fn clear_cache(&self) -> String {
-        let keep: Vec<String> = install::installed().into_iter().filter(|i| i.source_url.is_empty())
-            .map(|i| i.ipa_path).collect();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let busy = self.busy();
         let mut freed = dir_size(&state::path("icons"));
         let _ = std::fs::remove_dir_all(state::path("icons"));
         if let Ok(meta) = std::fs::metadata(state::path("catalog.json")) {
@@ -1154,10 +1260,12 @@ impl App {
         let _ = std::fs::remove_file(state::path("catalog.json"));
         if let Ok(dir) = std::fs::read_dir(state::path("ipas")) {
             for e in dir.flatten() {
-                let path = e.path().to_string_lossy().into_owned();
-                if !keep.contains(&path) {
-                    freed += e.metadata().map(|m| m.len()).unwrap_or(0);
-                    let _ = std::fs::remove_file(e.path());
+                let Ok(meta) = e.metadata() else { continue };
+                if busy && meta.modified().map_or(true, |m| m > hour_ago) {
+                    continue;
+                }
+                if std::fs::remove_file(e.path()).is_ok() {
+                    freed += meta.len();
                 }
             }
         }
@@ -1184,6 +1292,16 @@ impl App {
                 Ok(format!("Updated to {version}. BariStore restarts; this page reloads by itself."))
             }
         }
+    }
+}
+
+/// Opens a livecontainer:// URL (through iOS: Minis's browser cannot).
+async fn open_livecontainer(url: &str) -> Result<(), String> {
+    match minis::open_url(url).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("iOS did not open LiveContainer. Install it (Featured › LiveContainer), trust your Apple ID \
+                          in Settings › General › VPN & Device Management, open it once, then try again.".into()),
+        Err(e) => Err(format!("Minis could not open LiveContainer: {e}")),
     }
 }
 
@@ -1256,21 +1374,28 @@ pub fn boot_id() -> &'static str {
 }
 
 /// Drops the IPAs no installed app needs (other versions, apps deleted or
-/// replaced, IPAs added but never installed) and broken downloads. Files
-/// from the last hour stay: an install sheet may be open for one, or a
-/// failed install be tried again. Run while no task is.
-fn prune_ipas() {
-    let keep: Vec<std::path::PathBuf> = install::installed().into_iter().map(|i| i.ipa_path.into()).collect();
-    let Ok(dir) = std::fs::read_dir(state::path("ipas")) else { return };
+/// replaced, IPAs added but never installed) and broken downloads, and the
+/// icons chosen for no installed app. Files from the last hour stay: an
+/// install sheet may be open for one, or a failed install be tried again.
+/// Run while no task is.
+fn prune_files() {
+    let installed = install::installed();
+    let keep: Vec<std::path::PathBuf> = installed.iter().map(|i| i.ipa_path.clone().into())
+        .chain(installed.iter().flat_map(|i| [&i.options.icon, &i.custom_icon])
+            .filter(|n| !n.is_empty()).map(|n| crate::icons::custom_dir().join(n)))
+        .collect();
     let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     let mut freed = 0;
-    for e in dir.flatten() {
-        let Ok(meta) = e.metadata() else { continue };
-        if meta.modified().map_or(true, |m| m > hour_ago) || keep.contains(&e.path()) {
-            continue;
-        }
-        if std::fs::remove_file(e.path()).is_ok() {
-            freed += meta.len();
+    for dir in [state::path("ipas"), crate::icons::custom_dir()] {
+        let Ok(dir) = std::fs::read_dir(dir) else { continue };
+        for e in dir.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.modified().map_or(true, |m| m > hour_ago) || keep.contains(&e.path()) {
+                continue;
+            }
+            if std::fs::remove_file(e.path()).is_ok() {
+                freed += meta.len();
+            }
         }
     }
     if freed > 0 {

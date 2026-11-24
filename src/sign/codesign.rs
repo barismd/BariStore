@@ -6,9 +6,10 @@
 
 use plist::{Dictionary, Value};
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::der;
+use crate::hash::Sha256;
 
 pub const PAGE_SHIFT: u8 = 14;
 pub const PAGE: usize = 1 << PAGE_SHIFT;
@@ -349,8 +350,11 @@ fn algorithm(oid: &str) -> Vec<u8> {
     der::seq(&[der::oid(oid), der::null()])
 }
 
-/// Detached CMS SignedData over the CodeDirectory.
-pub fn cms(code_directory: &[u8], id: &Identity) -> Result<Vec<u8>, String> {
+/// Detached CMS SignedData over the CodeDirectory. `sign` false: the same
+/// structure with a blank signature, to learn its size without the RSA
+/// operation (an RSA signature is as long as the key, the time a
+/// fixed-width UTCTime: the size never depends on what is signed).
+pub fn cms(code_directory: &[u8], id: &Identity, sign: bool) -> Result<Vec<u8>, String> {
     let digest = Sha256::digest(code_directory);
     let info = der::cert_info(&id.leaf)?;
     let issuer_and_serial = der::seq(&[info.issuer.to_vec(), info.serial.to_vec()]);
@@ -367,8 +371,12 @@ pub fn cms(code_directory: &[u8], id: &Identity) -> Result<Vec<u8>, String> {
     let mut sorted_attrs = attributes;
     sorted_attrs.sort();
     let signed = der::set(&sorted_attrs);
-    let signature = id.key.sign(Pkcs1v15Sign::new::<Sha256>(), &Sha256::digest(&signed))
-        .map_err(|e| format!("RSA signing failed: {e}"))?;
+    let signature = if sign {
+        id.key.sign(Pkcs1v15Sign::new::<sha2::Sha256>(), &Sha256::digest(&signed))
+            .map_err(|e| format!("RSA signing failed: {e}"))?
+    } else {
+        vec![0; rsa::traits::PublicKeyParts::size(&id.key)]
+    };
     let signer = der::seq(&[
         der::int(1),
         issuer_and_serial,
@@ -389,6 +397,10 @@ pub fn cms(code_directory: &[u8], id: &Identity) -> Result<Vec<u8>, String> {
     Ok(der::seq(&[der::oid("1.2.840.113549.1.7.2"), der::ctx(0, &signed_data)]))
 }
 
+/// Signs one architecture in one pass. The signature's size is known before
+/// any page is hashed (the CMS has the same size whatever it signs), so the
+/// header that announces it is written first, every page hashed once, and
+/// one RSA signature made (it took up to four rounds, each signed).
 fn sign_thin(data: &[u8], t: &Target, id: &Identity) -> Result<Vec<u8>, String> {
     let mach = Thin::parse(data)?;
     let code_end = mach.code_end()?;
@@ -402,13 +414,14 @@ fn sign_thin(data: &[u8], t: &Target, id: &Identity) -> Result<Vec<u8>, String> 
     if let Some(res) = t.code_resources {
         specials.push((SLOT_RESOURCES, sha(res)));
     }
-    let mut ent_blobs = None;
+    let mut blobs = vec![(SLOT_REQUIREMENTS, req)];
     if let Some(ent) = t.entitlements {
         let xml = blob(CSMAGIC_ENTITLEMENTS, &plist_xml(&Value::Dictionary(sorted(ent))));
         let der_ent = blob(CSMAGIC_DER_ENTITLEMENTS, &der_entitlements(ent)?);
         specials.push((SLOT_ENTITLEMENTS, sha(&xml)));
         specials.push((SLOT_DER_ENTITLEMENTS, sha(&der_ent)));
-        ent_blobs = Some((xml, der_ent));
+        blobs.push((SLOT_ENTITLEMENTS, xml));
+        blobs.push((SLOT_DER_ENTITLEMENTS, der_ent));
     }
     let mut flags = 0u64;
     if mach.filetype == MH_EXECUTE {
@@ -419,36 +432,26 @@ fn sign_thin(data: &[u8], t: &Target, id: &Identity) -> Result<Vec<u8>, String> 
             if on("com.apple.private.amfi.can-execute-cdhash") { flags |= 0x200; }
         }
     }
-    let exec_base = mach.text.fileoff;
-    let exec_limit = mach.text.fileoff + mach.text.filesize;
-    let mut predicted = 0usize;
-    let mut last: Option<(Vec<u8>, Vec<[u8; 32]>)> = None;
-    for _ in 0..4 {
-        let patched = mach.patched(dataoff, predicted)?;
-        let mut body = patched[..code_end].to_vec();
-        body.resize(dataoff, 0);
-        // A new size estimate only changes the header page: the others keep
-        // their hashes from the last round.
-        let pages = page_hashes(&body, last.as_ref().map(|(b, p)| (b.as_slice(), p.as_slice())));
-        let cd = code_directory(t.identifier, &id.team, dataoff, &specials, &pages, exec_base, exec_limit, flags);
-        let mut blobs = vec![(SLOT_CODEDIRECTORY, cd.clone()), (SLOT_REQUIREMENTS, req.clone())];
-        if let Some((xml, der_ent)) = &ent_blobs {
-            blobs.push((SLOT_ENTITLEMENTS, xml.clone()));
-            blobs.push((SLOT_DER_ENTITLEMENTS, der_ent.clone()));
-        }
-        blobs.push((SLOT_SIGNATURE, blob(CSMAGIC_BLOBWRAPPER, &cms(&cd, id)?)));
-        let mut sb = superblob(blobs);
-        sb.resize((sb.len() + 15) & !15, 0);
-        if sb.len() == predicted {
-            let mut out = mach.patched(dataoff, sb.len())?[..code_end].to_vec();
-            out.resize(dataoff, 0);
-            out.extend(sb);
-            return Ok(out);
-        }
-        predicted = sb.len();
-        last = Some((body, pages));
+    let (exec_base, exec_limit) = (mach.text.fileoff, mach.text.fileoff + mach.text.filesize);
+    let directory = |pages: &[[u8; 32]]| code_directory(t.identifier, &id.team, dataoff, &specials, pages, exec_base,
+                                                        exec_limit, flags);
+    let blank = directory(&vec![[0; 32]; dataoff.div_ceil(PAGE)]);
+    let wrapper_len = 8 + cms(&blank, id, false)?.len();
+    let size = (12 + 8 * (blobs.len() + 2) + blank.len() + wrapper_len
+        + blobs.iter().map(|(_, b)| b.len()).sum::<usize>() + 15) & !15;
+    let mut out = mach.patched(dataoff, size)?;
+    out.truncate(code_end);
+    out.resize(dataoff, 0);
+    let cd = directory(&page_hashes(&out));
+    blobs.push((SLOT_SIGNATURE, blob(CSMAGIC_BLOBWRAPPER, &cms(&cd, id, true)?)));
+    blobs.push((SLOT_CODEDIRECTORY, cd));
+    let mut sb = superblob(blobs);
+    sb.resize((sb.len() + 15) & !15, 0);
+    if sb.len() != size {
+        return Err(format!("the signature of {} came out at {} bytes, not {size}", t.identifier, sb.len()));
     }
-    Err(format!("the signature size did not settle for {}", t.identifier))
+    out.extend(sb);
+    Ok(out)
 }
 
 /// Threads for hashing: the cores the system reports, at most four.
@@ -456,20 +459,11 @@ pub fn workers() -> usize {
     std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(1)
 }
 
-/// SHA-256 of each page of `body`. Pages equal to the same page of `last`
-/// keep its hash; the rest are hashed on several threads when there are
-/// many (Minis runs each thread on its own core, emulated).
-fn page_hashes(body: &[u8], last: Option<(&[u8], &[[u8; 32]])>) -> Vec<[u8; 32]> {
+/// SHA-256 of each page of `body`, on several threads when there are many
+/// (Minis runs each thread on its own core, emulated).
+fn page_hashes(body: &[u8]) -> Vec<[u8; 32]> {
     let count = body.len().div_ceil(PAGE);
-    let hash = |i: usize| -> [u8; 32] {
-        let this = &body[i * PAGE..((i + 1) * PAGE).min(body.len())];
-        if let Some((prev, hashes)) = last {
-            if i < hashes.len() && prev.get(i * PAGE..((i + 1) * PAGE).min(prev.len())) == Some(this) {
-                return hashes[i];
-            }
-        }
-        Sha256::digest(this).into()
-    };
+    let hash = |i: usize| -> [u8; 32] { Sha256::digest(&body[i * PAGE..((i + 1) * PAGE).min(body.len())]).into() };
     let threads = workers();
     if threads < 2 || count < 256 {
         return (0..count).map(hash).collect();
@@ -525,4 +519,114 @@ pub fn sign_macho(data: &[u8], t: &Target, id: &Identity) -> Result<Vec<u8>, Str
         out.extend_from_slice(d);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    /// A thin arm64 executable: __TEXT (one section at 0x1000, a pattern)
+    /// and an empty __LINKEDIT at the end, unsigned.
+    pub fn macho(text: usize) -> Vec<u8> {
+        let mut d = vec![0u8; text + 0x4000];
+        let put32 = |d: &mut [u8], at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        let put64 = |d: &mut [u8], at: usize, v: u64| d[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        for (i, v) in [0xFEED_FACF, 0x0100_000C, 0, MH_EXECUTE, 2, 152 + 72, 0, 0].into_iter().enumerate() {
+            put32(&mut d, i * 4, v);
+        }
+        let segment = |d: &mut Vec<u8>, at: usize, size: u32, name: &[u8], fileoff: u64, filesize: u64, nsects: u32| {
+            put32(d, at, LC_SEGMENT_64);
+            put32(d, at + 4, size);
+            d[at + 8..at + 8 + name.len()].copy_from_slice(name);
+            put64(d, at + 24, 0x1_0000_0000 + fileoff);
+            put64(d, at + 32, filesize);
+            put64(d, at + 40, fileoff);
+            put64(d, at + 48, filesize);
+            put32(d, at + 64, nsects);
+        };
+        segment(&mut d, 32, 152, b"__TEXT", 0, text as u64, 1);
+        d[104..110].copy_from_slice(b"__text");
+        d[120..126].copy_from_slice(b"__TEXT");
+        put32(&mut d, 104 + 48, 0x1000);
+        segment(&mut d, 184, 72, b"__LINKEDIT", text as u64, 0x4000, 0);
+        for (i, b) in d[0x1000..text].iter_mut().enumerate() {
+            *b = (i * 13 / 7) as u8;
+        }
+        d
+    }
+
+    /// A self-signed identity from openssl (its key and certificate).
+    pub fn identity() -> Identity {
+        let dir = std::env::temp_dir().join(format!("baristore-id-{}-{}", std::process::id(), rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (key, cert) = (dir.join("k.pem"), dir.join("c.der"));
+        assert!(std::process::Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=Apple Development: Test/OU=TEAMID1234",
+                   "-days", "1", "-outform", "DER", "-keyout", key.to_str().unwrap(), "-out", cert.to_str().unwrap()])
+            .output().unwrap().status.success());
+        use rsa::pkcs8::DecodePrivateKey;
+        let id = Identity {
+            leaf: std::fs::read(&cert).unwrap(),
+            chain: vec![],
+            key: RsaPrivateKey::from_pkcs8_pem(&std::fs::read_to_string(&key).unwrap()).unwrap(),
+            team: "TEAMID1234".into(),
+            common_name: "Apple Development: Test".into(),
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        id
+    }
+
+    /// The blob at `slot` of a signed binary's superblob.
+    pub fn blob_at(signed: &[u8], slot: u32) -> Option<Vec<u8>> {
+        let (_, dataoff, _) = Thin::parse(signed).ok()?.signature?;
+        let sb = &signed[dataoff as usize..];
+        let be = |o: usize| u32::from_be_bytes(sb[o..o + 4].try_into().unwrap()) as usize;
+        (0..be(8)).find(|i| be(12 + i * 8) == slot as usize).map(|i| {
+            let at = be(16 + i * 8);
+            sb[at..at + be(at + 4)].to_vec()
+        })
+    }
+
+    /// One pass gives a signature of the size its load command announces,
+    /// page hashes of the final bytes, and a CMS OpenSSL verifies.
+    #[test]
+    fn signature_in_one_pass() {
+        let id = identity();
+        let mut ent = Dictionary::new();
+        ent.insert("get-task-allow".into(), Value::Boolean(true));
+        let target = Target { identifier: "com.example.test", entitlements: Some(&ent), info_plist: Some(b"info"),
+                              code_resources: Some(b"resources") };
+        let macho = macho(0x4_8000);
+        let signed = sign_macho(&macho, &target, &id).unwrap();
+        let thin = Thin::parse(&signed).unwrap();
+        let (_, dataoff, datasize) = thin.signature.unwrap();
+        assert_eq!(dataoff as usize, macho.len());
+        assert_eq!(dataoff as usize + datasize as usize, signed.len());
+        assert_eq!(thin.linkedit.fileoff + thin.linkedit.filesize, signed.len() as u64);
+        let cd = blob_at(&signed, SLOT_CODEDIRECTORY).unwrap();
+        let be = |o: usize| u32::from_be_bytes(cd[o..o + 4].try_into().unwrap()) as usize;
+        let (hashes, slots, limit) = (be(16), be(28), be(32));
+        assert_eq!(limit, dataoff as usize);
+        assert_eq!(slots, limit.div_ceil(PAGE));
+        for i in 0..slots {
+            let page = &signed[i * PAGE..((i + 1) * PAGE).min(limit)];
+            assert_eq!(&cd[hashes + i * 32..hashes + i * 32 + 32], &Sha256::digest(page)[..], "page {i}");
+        }
+        assert_eq!(&cd[hashes - 32..hashes], &Sha256::digest(b"info")[..]);
+        assert_eq!(&cd[hashes - 96..hashes - 64], &Sha256::digest(b"resources")[..]);
+        // Signed again: same size, the old signature replaced.
+        let again = sign_macho(&signed, &target, &id).unwrap();
+        assert_eq!(again.len(), signed.len());
+        let wrapper = blob_at(&signed, SLOT_SIGNATURE).unwrap();
+        let dir = std::env::temp_dir().join(format!("baristore-cms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cd"), &cd).unwrap();
+        std::fs::write(dir.join("sig"), &wrapper[8..]).unwrap();
+        let out = std::process::Command::new("openssl")
+            .args(["cms", "-verify", "-binary", "-inform", "DER", "-noverify", "-in", dir.join("sig").to_str().unwrap(),
+                   "-content", dir.join("cd").to_str().unwrap(), "-out", "/dev/null"])
+            .output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
 }

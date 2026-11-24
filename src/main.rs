@@ -3,6 +3,7 @@ mod apple;
 mod der;
 mod device;
 mod doctor;
+mod hash;
 mod icons;
 mod install;
 mod log;
@@ -470,7 +471,7 @@ async fn dev(args: &[String]) -> Result<(), String> {
                 rsa::RsaPrivateKey::from_pkcs8_der(&std::fs::read(a(4)?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?
             };
             let team = a(5)?;
-            let mut ipa = sign::bundle::Ipa::read(bytes)?;
+            let mut ipa = sign::bundle::Ipa::read(bytes, &|_, _| {})?;
             let mut plan = sign::bundle::Plan {
                 identity: sign::codesign::Identity { leaf, chain: vec![], key, team: team.clone(), common_name: "Test".into() },
                 bundles: Default::default(), info_edits: Default::default(), add_files: vec![],

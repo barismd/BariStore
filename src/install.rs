@@ -22,6 +22,10 @@ pub struct Options {
     pub remove_extensions: bool,
     /// Ask Apple for Increased Memory Limit on the main App ID.
     pub increased_memory: bool,
+    /// A picture of the user's as the app's icon (a file in app-icons/,
+    /// see `icons::custom_icon`); "" keeps the app's own.
+    #[serde(default)]
+    pub icon: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -61,6 +65,40 @@ pub struct Installed {
     pub origin: String,
     #[serde(default)]
     pub channel: String,
+    /// The picture of the user's the app was signed with as its icon ("":
+    /// its own); `options.icon` is the one its next signing takes.
+    #[serde(default)]
+    pub custom_icon: String,
+}
+
+impl Installed {
+    /// The icon My Apps shows: the one the app on the iPhone has.
+    pub fn shown_icon(&self) -> String {
+        if self.custom_icon.is_empty() { self.icon_url.clone() } else { crate::icons::custom_icon_url(&self.custom_icon) }
+    }
+
+    /// The options the app is signed with again (an update, a full
+    /// refresh): its own, and Increased Memory Limit kept once it has it.
+    pub fn signing_options(&self) -> Options {
+        Options { increased_memory: self.options.increased_memory || self.increased_memory, ..self.options.clone() }
+    }
+}
+
+/// An identifier typed for a custom App ID: letters, digits, '-' and '.',
+/// with the team appended as BariStore's own are (an App ID belongs to one
+/// team everywhere).
+pub fn custom_identifier(typed: &str, team: &str) -> Result<String, String> {
+    let id = typed.trim();
+    let ok = id.contains('.') && !id.starts_with('.') && !id.ends_with('.') && !id.contains("..")
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !ok {
+        return Err("A custom App ID looks like com.example.app: letters, digits, '-' and dots.".into());
+    }
+    let full = new_identifier(id, team);
+    if full.len() > 155 {
+        return Err("That App ID is too long.".into());
+    }
+    Ok(full)
 }
 
 /// SideStore: reads the pairing file and ALTCertificate.p12.
@@ -327,13 +365,25 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: Vec<u8>, opts: &Opti
                               status: &(dyn Fn(String) + Send + Sync)) -> Result<Prepared, String> {
     let portal = Portal { gs: ctx.gs, account: ctx.account };
     let team = ctx.team.id.as_str();
-    let mut ipa = tokio::task::block_in_place(|| Ipa::read(ipa_bytes))?;
+    let started = std::time::Instant::now();
+    let shown = std::sync::atomic::AtomicU64::new(u64::MAX);
+    let mut ipa = tokio::task::block_in_place(|| Ipa::read(ipa_bytes, &|done, total| {
+        let pct = done * 100 / total.max(1);
+        if shown.swap(pct, std::sync::atomic::Ordering::Relaxed) != pct {
+            status(format!("Reading the app: {pct}%"));
+        }
+    }))?;
+    logf!("install: read in {:.1} s", started.elapsed().as_secs_f64());
     if opts.remove_extensions {
         let n = ipa.drop_extensions()?;
         logf!("install: removed {n} extension files");
     }
-    let bundles = ipa.bundles()?;
     let main = ipa.main_app()?;
+    if !opts.icon.is_empty() {
+        let picture = crate::icons::custom_icon(&opts.icon).ok_or("The icon you chose is gone: choose it again.")?;
+        tokio::task::block_in_place(|| bundle::replace_icon(&mut ipa, &main, &picture))?;
+    }
+    let bundles = ipa.bundles()?;
     let mut apps: Vec<&bundle::Bundle> = bundles.iter().filter(|b| b.kind != Kind::Framework).collect();
     apps.sort_by_key(|b| b.depth());
     let mut main_new = ctx.previous.map(|(id, ids)| ids.get(&main.dir).cloned().unwrap_or_else(|| id.to_string()))
@@ -375,6 +425,9 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: Vec<u8>, opts: &Opti
                 portal.add_app_id(team, &new_id, &b.name).await
                     .map_err(|e| if e.code == 9401 || e.message.contains("maximum") {
                         format!("Apple has no App ID left for {} ({e}). Turning on Remove extensions needs fewer.", b.name)
+                    } else if ctx.reuse.pick.is_some() && b.dir == main.dir {
+                        format!("Apple refused the App ID {new_id} ({e}). An App ID belongs to one developer \
+                                 everywhere: choose another.")
                     } else { e.to_string() })?
             }
         };
@@ -448,6 +501,8 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, ipa_bytes: Vec<u8>, opts: &Opti
     let kind = kind_for(&main.id, has_sidestore_framework(&ipa));
     let out = tokio::task::block_in_place(|| {
         bundle::sign(&mut ipa, &plan, &mut |n, t| status(format!("Signing {n} of {t}")))?;
+        logf!("install: signed in {:.1} s", started.elapsed().as_secs_f64());
+        status("Packing the app".into());
         ipa.write()
     })?;
     logf!("install: signed and packed in {:.1} s", started.elapsed().as_secs_f64());
@@ -596,7 +651,7 @@ pub fn p12_password() -> String {
     (0..10).map(|_| ALPHABET[rand::random::<usize>() % ALPHABET.len()] as char).collect()
 }
 
-fn percent_encode(text: &str) -> String {
+pub fn percent_encode(text: &str) -> String {
     text.bytes().map(|b| match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
         _ => format!("%{b:02X}"),
@@ -741,6 +796,15 @@ mod tests {
         // Another app (or a copy) is installed under it.
         assert_eq!(fresh_identifier("com.a.b", "T1", &on(&["com.a.b.T1"])), "com.a.b2.T1");
         assert_eq!(fresh_identifier("com.a.b.T1", "T1", &on(&["com.a.b.T1", "com.a.b2.T1"])), "com.a.b3.T1");
+    }
+
+    #[test]
+    fn custom_app_ids() {
+        assert_eq!(custom_identifier(" com.me.app ", "T1").unwrap(), "com.me.app.T1");
+        assert_eq!(custom_identifier("com.me.app.T1", "T1").unwrap(), "com.me.app.T1");
+        for bad in ["app", ".com.me", "com..me", "com.me.", "com.me/app", "com.me app", ""] {
+            assert!(custom_identifier(bad, "T1").is_err(), "{bad}");
+        }
     }
 
     #[test]

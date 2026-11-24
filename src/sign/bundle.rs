@@ -2,12 +2,14 @@
 //! deepest-first, seal CodeResources, check the result, write the IPA.
 
 use plist::{Dictionary, Value};
-use sha1::Sha1;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Cursor, Read, Write};
+use std::io::{BufReader, Cursor, Read, Write};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use super::codesign::{self, Identity, Target};
+use crate::hash::{Sha1, Sha256};
 
 #[derive(Clone)]
 pub struct Entry {
@@ -17,20 +19,28 @@ pub struct Entry {
     /// Index in the original archive while the bytes are unchanged: the
     /// entry is then copied over compressed as it was, not compressed again.
     raw: Option<usize>,
-    /// SHA-1 and SHA-256 of `data`, computed once: a parent bundle seals the
-    /// files of its nested bundles too.
-    digests: std::cell::OnceCell<(Vec<u8>, Vec<u8>)>,
+    /// SHA-1 and SHA-256 of `data`, computed once (on the thread that
+    /// signed it, when it is new): a parent bundle seals the files of its
+    /// nested bundles too.
+    digests: OnceLock<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Entry {
     fn new(data: Vec<u8>, mode: u32, symlink: bool, raw: Option<usize>) -> Entry {
-        Entry { data, mode, symlink, raw, digests: std::cell::OnceCell::new() }
+        Entry { data, mode, symlink, raw, digests: OnceLock::new() }
+    }
+
+    /// New bytes, hashed now.
+    fn hashed_now(data: Vec<u8>, mode: u32) -> Entry {
+        let entry = Entry::new(data, mode, false, None);
+        entry.digests();
+        entry
     }
 
     /// An unchanged file whose bytes are not kept: only its digests (for
     /// CodeResources) and its place in the original archive.
     fn hashed(mode: u32, raw: usize, digests: (Vec<u8>, Vec<u8>)) -> Entry {
-        Entry { data: Vec::new(), mode, symlink: false, raw: Some(raw), digests: std::cell::OnceCell::from(digests) }
+        Entry { data: Vec::new(), mode, symlink: false, raw: Some(raw), digests: OnceLock::from(digests) }
     }
 
     fn digests(&self) -> &(Vec<u8>, Vec<u8>) {
@@ -108,10 +118,16 @@ pub struct Peek {
     pub removable: usize,
 }
 
+/// An IPA file for reading its zip directory: buffered, since the directory
+/// is read a few bytes at a time and each read is a system call (slow under
+/// Minis's emulation; a big app has thousands of entries).
+fn open(path: &std::path::Path) -> Result<BufReader<std::fs::File>, String> {
+    Ok(BufReader::with_capacity(256 << 10, std::fs::File::open(path).map_err(|e| e.to_string())?))
+}
+
 /// The file names inside an IPA (its zip directory only).
 pub fn names(path: &std::path::Path) -> Result<Vec<String>, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let zip = zip::ZipArchive::new(file).map_err(|_| "This file is not an IPA.".to_string())?;
+    let zip = zip::ZipArchive::new(open(path)?).map_err(|_| "This file is not an IPA.".to_string())?;
     Ok(zip.file_names().map(str::to_string).collect())
 }
 
@@ -130,8 +146,7 @@ pub fn extension_counts<'a>(names: impl IntoIterator<Item = &'a str>) -> (usize,
 }
 
 pub fn peek(path: &std::path::Path) -> Result<Peek, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|_| "This file is not an IPA.".to_string())?;
+    let mut zip = zip::ZipArchive::new(open(path)?).map_err(|_| "This file is not an IPA.".to_string())?;
     let (extensions, removable) = extension_counts(zip.file_names());
     let name = (0..zip.len()).filter_map(|i| zip.name_for_index(i).map(str::to_string))
         .find(|n| n.starts_with("Payload/") && n.ends_with(".app/Info.plist") && n.matches('/').count() == 2)
@@ -156,8 +171,7 @@ pub fn peek(path: &std::path::Path) -> Result<Peek, String> {
 /// CFBundleIconFiles, CFBundleIconFile), else one called AppIcon… or Icon….
 /// Apps whose icon is only in Assets.car have none here.
 pub fn icon(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|_| "This file is not an IPA.".to_string())?;
+    let mut zip = zip::ZipArchive::new(open(path)?).map_err(|_| "This file is not an IPA.".to_string())?;
     let info_name = zip.file_names()
         .find(|n| n.starts_with("Payload/") && n.ends_with(".app/Info.plist") && n.matches('/').count() == 2)
         .ok_or("This IPA has no app in Payload/.")?.to_string();
@@ -202,8 +216,9 @@ impl Ipa {
     /// (Mach-O files, plists, profiles, symlinks); every other file is hashed
     /// as it is read and later copied from `bytes` as it was, so a big app
     /// does not need its whole unpacked size in memory. Entries are unpacked
-    /// and hashed on several threads, the biggest spread first.
-    pub fn read(bytes: Vec<u8>) -> Result<Ipa, String> {
+    /// and hashed on several threads, the biggest spread first. `progress`
+    /// gets the compressed bytes done and their total, from those threads.
+    pub fn read(bytes: Vec<u8>, progress: &(dyn Fn(u64, u64) + Sync)) -> Result<Ipa, String> {
         let mut files = BTreeMap::new();
         let mut order = Vec::new();
         {
@@ -221,19 +236,26 @@ impl Ipa {
                 entries.push((i, f.compressed_size()));
                 order.push(name);
             }
+            let total: u64 = entries.iter().map(|(_, size)| size).sum();
+            let done = AtomicU64::new(0);
             let workers = codesign::workers();
-            let mut shares: Vec<(u64, Vec<usize>)> = vec![(0, Vec::new()); workers];
+            let mut shares: Vec<(u64, Vec<(usize, u64)>)> = vec![(0, Vec::new()); workers];
             let mut by_size = entries.clone();
             by_size.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
             for (index, size) in by_size {
                 let lightest = shares.iter_mut().min_by_key(|(load, _)| *load).expect("one worker");
                 lightest.0 += size;
-                lightest.1.push(index);
+                lightest.1.push((index, size));
             }
             let parts: Vec<Result<Vec<(String, Entry)>, String>> = std::thread::scope(|scope| {
-                let handles: Vec<_> = shares.into_iter().map(|(_, indices)| {
+                let handles: Vec<_> = shares.into_iter().map(|(_, share)| {
                     let mut zip = zip.clone();
-                    scope.spawn(move || indices.into_iter().map(|i| read_entry(&mut zip, i)).collect())
+                    let done = &done;
+                    scope.spawn(move || share.into_iter().map(|(i, size)| {
+                        let entry = read_entry(&mut zip, i);
+                        progress(done.fetch_add(size, Ordering::Relaxed) + size, total);
+                        entry
+                    }).collect())
                 }).collect();
                 handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("reading the IPA failed".into()))).collect()
             });
@@ -305,16 +327,19 @@ impl Ipa {
     }
 
     fn put(&mut self, path: &str, data: Vec<u8>, mode: u32) {
+        self.set(path, Entry::new(data, mode, false, None));
+    }
+
+    fn set(&mut self, path: &str, entry: Entry) {
         if !self.files.contains_key(path) {
             self.order.push(path.to_string());
         }
-        self.files.insert(path.to_string(), Entry::new(data, mode, false, None));
+        self.files.insert(path.to_string(), entry);
     }
 
-    /// New bytes for an existing file (keeps its mode).
-    fn replace(&mut self, path: &str, data: Vec<u8>) {
-        let mode = self.files.get(path).map(|e| e.mode).unwrap_or(0o755);
-        self.put(path, data, mode);
+    /// The mode of a file (an executable's when it is new).
+    fn mode(&self, path: &str) -> u32 {
+        self.files.get(path).map(|e| e.mode).unwrap_or(0o755)
     }
 
     fn write_info(&mut self, dir: &str, info: &Dictionary) -> Result<(), String> {
@@ -396,7 +421,16 @@ impl Ipa {
         codesign::plist_xml(&Value::Dictionary(codesign::sorted(&top)))
     }
 
+    /// The signed IPA. Unchanged entries are copied over compressed as they
+    /// were; the new ones are compressed side by side, each into a zip of its
+    /// own, and copied in from there.
     pub fn write(&self) -> Result<Vec<u8>, String> {
+        let mut new: Vec<(&String, &Entry)> = self.order.iter()
+            .filter_map(|p| self.files.get(p).map(|e| (p, e)))
+            .filter(|(_, e)| e.raw.is_none() && !e.symlink).collect();
+        new.sort_by_key(|(_, e)| std::cmp::Reverse(e.data.len()));
+        let packed: HashMap<&String, Vec<u8>> = new.iter().map(|(p, _)| *p)
+            .zip(parallel(&new, |(path, entry)| pack(path, entry))?).collect();
         let mut source = zip::ZipArchive::new(Cursor::new(&self.source[..])).map_err(|e| e.to_string())?;
         let mut out = zip::ZipWriter::new(Cursor::new(Vec::with_capacity(self.source.len() + (1 << 20))));
         for path in &self.order {
@@ -404,23 +438,54 @@ impl Ipa {
             if let Some(index) = entry.raw {
                 let file = source.by_index_raw(index).map_err(|e| e.to_string())?;
                 out.raw_copy_file(file).map_err(|e| e.to_string())?;
-                continue;
-            }
-            if entry.symlink {
+            } else if entry.symlink {
                 let target = String::from_utf8_lossy(&entry.data).into_owned();
                 out.add_symlink(path, target, zip::write::SimpleFileOptions::default())
                     .map_err(|e| e.to_string())?;
-                continue;
+            } else {
+                let mut one = zip::ZipArchive::new(Cursor::new(&packed[path][..])).map_err(|e| e.to_string())?;
+                out.raw_copy_file(one.by_index_raw(0).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             }
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated)
-                .compression_level(Some(1))
-                .unix_permissions(entry.mode & 0o7777);
-            out.start_file(path, options).map_err(|e| e.to_string())?;
-            out.write_all(&entry.data).map_err(|e| e.to_string())?;
         }
         Ok(out.finish().map_err(|e| e.to_string())?.into_inner())
     }
+}
+
+/// One new entry as a zip of its own (deflated, level 1).
+fn pack(path: &str, entry: &Entry) -> Result<Vec<u8>, String> {
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(Some(1))
+        .unix_permissions(entry.mode & 0o7777);
+    let mut one = zip::ZipWriter::new(Cursor::new(Vec::with_capacity(entry.data.len() / 2 + 512)));
+    one.start_file(path, options).map_err(|e| e.to_string())?;
+    one.write_all(&entry.data).map_err(|e| e.to_string())?;
+    Ok(one.finish().map_err(|e| e.to_string())?.into_inner())
+}
+
+/// `f` over `items` on up to `codesign::workers()` threads (Minis runs each
+/// on its own core), the results in the items' order; the first error wins.
+fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R, String> + Sync) -> Result<Vec<R>, String> {
+    let threads = codesign::workers().min(items.len());
+    if threads < 2 {
+        return items.iter().map(f).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let mut results: Vec<(usize, Result<R, String>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads).map(|_| scope.spawn(|| {
+            let mut mine = Vec::new();
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break mine };
+                mine.push((i, f(item)));
+            }
+        })).collect();
+        handles.into_iter()
+            .flat_map(|h| h.join().unwrap_or_else(|_| vec![(usize::MAX, Err("a signing thread failed".into()))]))
+            .collect()
+    });
+    results.sort_by_key(|(i, _)| *i);
+    results.into_iter().map(|(_, r)| r).collect()
 }
 
 /// One entry of the archive: kept whole when signing needs its bytes, else
@@ -459,6 +524,48 @@ fn read_entry(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, i: usize) -> Result<(Str
         sha256.update(&buf[..n]);
     }
     Ok((name, Entry::hashed(mode, i, (sha1.finalize().to_vec(), sha256.finalize().to_vec()))))
+}
+
+/// The icon files a picture of the user's becomes, at the sizes iOS shows
+/// an app's icon on an iPhone (60 pt @2x, @3x) and an iPad (76 pt, 83.5 pt).
+const ICON_FILES: [(&str, u32); 4] = [("BariStoreIcon60x60@2x.png", 120), ("BariStoreIcon60x60@3x.png", 180),
+                                       ("BariStoreIcon76x76@2x~ipad.png", 152), ("BariStoreIcon83.5x83.5@2x~ipad.png", 167)];
+
+/// Replaces the app's icon with `picture` (a square PNG or JPEG): icon files
+/// at each size in the app, named in Info.plist (CFBundleIcons and ~ipad).
+/// The asset catalog's icon (CFBundleIconName) is no longer named, so iOS
+/// takes these files; alternate icons stay.
+pub fn replace_icon(ipa: &mut Ipa, app: &Bundle, picture: &[u8]) -> Result<(), String> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    let mut reader = image::ImageReader::new(Cursor::new(picture)).with_guessed_format().map_err(|e| e.to_string())?;
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| format!("the icon cannot be read: {e}"))?;
+    let side = img.width().min(img.height());
+    let img = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side);
+    for (name, px) in ICON_FILES {
+        let small = image::DynamicImage::ImageRgb8(img.resize_exact(px, px, image::imageops::FilterType::Lanczos3).into_rgb8());
+        let mut png = Cursor::new(Vec::new());
+        small.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        ipa.put(&format!("{}/{name}", app.dir), png.into_inner(), 0o644);
+    }
+    let names = |list: &[&str]| Value::Array(list.iter().map(|n| Value::String(n.to_string())).collect());
+    let mut info = ipa.files.get(&format!("{}/Info.plist", app.dir))
+        .and_then(|e| plist::from_bytes::<Value>(&e.data).ok()).and_then(Value::into_dictionary)
+        .ok_or("the app's Info.plist cannot be read")?;
+    for (key, files) in [("CFBundleIcons", names(&["BariStoreIcon60x60"])),
+                         ("CFBundleIcons~ipad", names(&["BariStoreIcon60x60", "BariStoreIcon76x76", "BariStoreIcon83.5x83.5"]))] {
+        let mut icons = info.get(key).and_then(Value::as_dictionary).cloned().unwrap_or_default();
+        let mut primary = Dictionary::new();
+        primary.insert("CFBundleIconFiles".into(), files);
+        icons.insert("CFBundlePrimaryIcon".into(), Value::Dictionary(primary));
+        info.insert(key.into(), Value::Dictionary(icons));
+    }
+    for key in ["CFBundleIconFiles", "CFBundleIconFile", "CFBundleIconName"] {
+        info.remove(key);
+    }
+    ipa.write_info(&app.dir, &info)
 }
 
 /// The plist inside a .mobileprovision (CMS-wrapped).
@@ -506,47 +613,69 @@ pub fn sign(ipa: &mut Ipa, plan: &Plan, progress: &mut dyn FnMut(usize, usize)) 
             b.info = info;
         }
     }
-    bundles.sort_by_key(|b| std::cmp::Reverse(b.depth()));
+    if let Some(b) = bundles.iter().find(|b| b.kind != Kind::Framework && !plan.bundles.contains_key(&b.dir)) {
+        return Err(format!("no profile was prepared for {} ({})", b.name, b.id));
+    }
     let dirs: Vec<String> = bundles.iter().map(|b| b.dir.clone()).collect();
-    let total = bundles.len();
-    for (n, b) in bundles.iter().enumerate() {
-        let signing = plan.bundles.get(&b.dir);
-        if b.kind != Kind::Framework && signing.is_none() {
-            return Err(format!("no profile was prepared for {} ({})", b.name, b.id));
+    let mut depths: Vec<usize> = bundles.iter().map(Bundle::depth).collect();
+    depths.sort_unstable();
+    depths.dedup();
+    let (total, mut done) = (bundles.len(), 0);
+    // Deepest first (parents seal their children), a depth at a time: the
+    // bundles of one depth never contain one another, so their binaries are
+    // signed side by side, and hashed for their parents' seal right there.
+    for depth in depths.into_iter().rev() {
+        let level: Vec<&Bundle> = bundles.iter().filter(|b| b.depth() == depth).collect();
+        for b in &level {
+            if let Some(s) = plan.bundles.get(&b.dir) {
+                ipa.put(&format!("{}/embedded.mobileprovision", b.dir), s.profile.clone(), 0o644);
+            }
         }
-        if let Some(s) = signing {
-            ipa.put(&format!("{}/embedded.mobileprovision", b.dir), s.profile.clone(), 0o644);
-        }
-        // Loose Mach-O files (dylibs, helpers) that belong to this bundle.
-        let prefix = format!("{}/", b.dir);
-        let nested: Vec<&String> = dirs.iter().filter(|d| d.starts_with(&prefix)).collect();
-        let main = format!("{}/{}", b.dir, b.executable);
-        let loose: Vec<String> = ipa.files.iter()
-            .filter(|(p, e)| p.starts_with(&prefix) && **p != main && !e.symlink
-                    && !nested.iter().any(|d| p.starts_with(&format!("{d}/")))
-                    && codesign::is_macho(&e.data))
-            .map(|(p, _)| p.clone()).collect();
-        for path in loose {
-            let data = ipa.files[&path].data.clone();
+        // Loose Mach-O files (dylibs, helpers) of these bundles, biggest first.
+        let mut loose: Vec<(&String, &Entry)> = level.iter().flat_map(|b| {
+            let prefix = format!("{}/", b.dir);
+            let main = format!("{}/{}", b.dir, b.executable);
+            let nested: Vec<String> = dirs.iter().filter(|d| d.starts_with(&prefix)).map(|d| format!("{d}/")).collect();
+            ipa.files.range(prefix.clone()..).take_while(move |(p, _)| p.starts_with(&prefix))
+                .filter(move |(p, e)| **p != main && !e.symlink && !nested.iter().any(|d| p.starts_with(d))
+                        && codesign::is_macho(&e.data))
+                .collect::<Vec<_>>()
+        }).collect();
+        loose.sort_by_key(|(_, e)| std::cmp::Reverse(e.data.len()));
+        let signed = parallel(&loose, |(path, entry)| {
             let name = path.rsplit('/').next().unwrap_or("");
-            let identifier = match codesign::macho_uuid(&data) {
+            let identifier = match codesign::macho_uuid(&entry.data) {
                 Some(u) => format!("{name}-{u}"),
                 None => name.to_string(),
             };
             let target = Target { identifier: &identifier, entitlements: None, info_plist: None, code_resources: None };
-            let signed = codesign::sign_macho(&data, &target, &plan.identity).map_err(|e| format!("{path}: {e}"))?;
-            ipa.replace(&path, signed);
+            let signed = codesign::sign_macho(&entry.data, &target, &plan.identity).map_err(|e| format!("{path}: {e}"))?;
+            Ok(((*path).clone(), Entry::hashed_now(signed, entry.mode)))
+        })?;
+        for (path, entry) in signed {
+            ipa.set(&path, entry);
         }
-        let resources = ipa.code_resources(&b.dir, &b.executable);
-        let mode = ipa.files.get(&format!("{}/_CodeSignature/CodeResources", b.dir)).map(|e| e.mode).unwrap_or(0o644);
-        ipa.put(&format!("{}/_CodeSignature/CodeResources", b.dir), resources.clone(), mode);
-        let info_raw = ipa.files.get(&format!("{}/Info.plist", b.dir)).map(|e| e.data.clone());
-        let entitlements = signing.map(|s| &s.entitlements);
-        let target = Target { identifier: &b.id, entitlements, info_plist: info_raw.as_deref(), code_resources: Some(&resources) };
-        let data = ipa.files[&main].data.clone();
-        let signed = codesign::sign_macho(&data, &target, &plan.identity).map_err(|e| format!("{main}: {e}"))?;
-        ipa.replace(&main, signed);
-        progress(n + 1, total);
+        // Each bundle's seal, then its executable.
+        let sealed = parallel(&level, |b| {
+            let resources = ipa.code_resources(&b.dir, &b.executable);
+            let info = ipa.files.get(&format!("{}/Info.plist", b.dir)).map(|e| e.data.as_slice());
+            let target = Target { identifier: &b.id, entitlements: plan.bundles.get(&b.dir).map(|s| &s.entitlements),
+                                  info_plist: info, code_resources: Some(&resources) };
+            let main = format!("{}/{}", b.dir, b.executable);
+            let signed = codesign::sign_macho(&ipa.files[&main].data, &target, &plan.identity)
+                .map_err(|e| format!("{main}: {e}"))?;
+            Ok((b.dir.clone(), resources, main, signed))
+        })?;
+        for (dir, resources, main, signed) in sealed {
+            let path = format!("{dir}/_CodeSignature/CodeResources");
+            let mode = ipa.files.get(&path).map(|e| e.mode).unwrap_or(0o644);
+            ipa.set(&path, Entry::hashed_now(resources, mode));
+            // The app's own executable is sealed by no one: not hashed.
+            let mode = ipa.mode(&main);
+            ipa.set(&main, if depth > 1 { Entry::hashed_now(signed, mode) } else { Entry::new(signed, mode, false, None) });
+        }
+        done += level.len();
+        progress(done, total);
     }
     verify(ipa)
 }
@@ -615,4 +744,96 @@ fn code_directory_of(m: &[u8]) -> Option<&[u8]> {
         off += le(off + 4) as usize;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sign::codesign::tests::{blob_at, identity, macho};
+
+    fn info(id: &str, exe: &str, extra: &[(&str, Value)]) -> Vec<u8> {
+        let mut d = Dictionary::new();
+        d.insert("CFBundleIdentifier".into(), Value::String(id.into()));
+        d.insert("CFBundleExecutable".into(), Value::String(exe.into()));
+        for (k, v) in extra {
+            d.insert((*k).into(), v.clone());
+        }
+        codesign::plist_xml(&Value::Dictionary(d))
+    }
+
+    /// An app with a framework, a loose dylib and a resource, signed (the
+    /// binaries of a depth side by side), a picture made its icon, packed
+    /// (new entries compressed side by side) and read back.
+    #[test]
+    fn signs_and_packs_an_app() {
+        let mut primary = Dictionary::new();
+        primary.insert("CFBundleIconName".into(), Value::String("AppIcon".into()));
+        let mut icons = Dictionary::new();
+        icons.insert("CFBundlePrimaryIcon".into(), Value::Dictionary(primary));
+        let files: Vec<(&str, Vec<u8>, u32)> = vec![
+            ("Payload/A.app/Info.plist", info("com.a", "A", &[("CFBundleIcons", Value::Dictionary(icons))]), 0o644),
+            ("Payload/A.app/A", macho(0x8000), 0o755),
+            ("Payload/A.app/res.txt", b"resource".repeat(5000), 0o644),
+            ("Payload/A.app/Frameworks/libx.dylib", macho(0xC000), 0o755),
+            ("Payload/A.app/Frameworks/F.framework/Info.plist", info("com.f", "F", &[]), 0o644),
+            ("Payload/A.app/Frameworks/F.framework/F", macho(0x8000), 0o755),
+        ];
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data, mode) in &files {
+            let opts = zip::write::SimpleFileOptions::default().unix_permissions(*mode);
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        let reported = std::sync::Mutex::new(0);
+        let mut ipa = Ipa::read(bytes, &|done, total| *reported.lock().unwrap() = done * 100 / total).unwrap();
+        assert_eq!(*reported.lock().unwrap(), 100);
+        let main = ipa.main_app().unwrap();
+        let mut picture = Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(600, 400, image::Rgba([200, 30, 30, 255]))
+            .write_to(&mut picture, image::ImageFormat::Png).unwrap();
+        replace_icon(&mut ipa, &main, picture.get_ref()).unwrap();
+        let mut ent = Dictionary::new();
+        ent.insert("application-identifier".into(), Value::String("T.com.a.T".into()));
+        let plan = Plan {
+            identity: identity(),
+            bundles: HashMap::from([("Payload/A.app".to_string(),
+                                     Signing { new_id: "com.a.T".into(), profile: b"profile".to_vec(), entitlements: ent })]),
+            info_edits: HashMap::new(),
+            add_files: vec![],
+        };
+        let mut steps = Vec::new();
+        sign(&mut ipa, &plan, &mut |n, t| steps.push((n, t))).unwrap();
+        assert_eq!(steps.last(), Some(&(2, 2)));
+        let out = ipa.write().unwrap();
+        let mut back = zip::ZipArchive::new(Cursor::new(&out[..])).unwrap();
+        let mut read = |name: &str| {
+            let mut f = back.by_name(name).unwrap_or_else(|_| panic!("{name} missing"));
+            let mode = f.unix_mode().unwrap_or(0) & 0o777;
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            (data, mode)
+        };
+        let (exe, mode) = read("Payload/A.app/A");
+        assert_eq!(mode, 0o755);
+        let info: Dictionary = plist::from_bytes(&read("Payload/A.app/Info.plist").0).unwrap();
+        assert_eq!(info["CFBundleIdentifier"].as_string(), Some("com.a.T"));
+        let primary = info["CFBundleIcons"].as_dictionary().unwrap()["CFBundlePrimaryIcon"].as_dictionary().unwrap();
+        assert!(primary.get("CFBundleIconName").is_none());
+        assert_eq!(primary["CFBundleIconFiles"].as_array().unwrap()[0].as_string(), Some("BariStoreIcon60x60"));
+        for (name, px) in ICON_FILES {
+            let icon = image::load_from_memory(&read(&format!("Payload/A.app/{name}")).0).unwrap();
+            assert_eq!((icon.width(), icon.height()), (px, px));
+        }
+        let resources: Dictionary = plist::from_bytes(&read("Payload/A.app/_CodeSignature/CodeResources").0).unwrap();
+        let files2 = resources["files2"].as_dictionary().unwrap();
+        let hash = |name: &str| files2[name].as_dictionary().unwrap()["hash2"].as_data().unwrap().to_vec();
+        assert_eq!(hash("res.txt"), Sha256::digest(b"resource".repeat(5000)).to_vec());
+        assert_eq!(hash("Frameworks/libx.dylib"), Sha256::digest(read("Payload/A.app/Frameworks/libx.dylib").0).to_vec());
+        assert_eq!(hash("Frameworks/F.framework/F"), Sha256::digest(read("Payload/A.app/Frameworks/F.framework/F").0).to_vec());
+        assert_eq!(hash("BariStoreIcon60x60@3x.png"),
+                   Sha256::digest(read("Payload/A.app/BariStoreIcon60x60@3x.png").0).to_vec());
+        assert!(blob_at(&exe, 0x10000).is_some());
+        assert_eq!(read("Payload/A.app/res.txt").0, b"resource".repeat(5000));
+    }
 }

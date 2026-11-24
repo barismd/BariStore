@@ -23,7 +23,10 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 - **Refresh in seconds.** A refresh renews the apps' profiles: nothing is downloaded, signed or uploaded again (apps signed with an older certificate are signed again).
 - **JIT with one tap** for emulators and other JIT apps, right from BariStore.
 - **Sources and updates.** App sources, any IPA from Files (a newer build of one updates it in place), one-tap updates, and per-app beta tracks (Off, nightly, alpha…).
-- **Your App IDs under control.** See what uses each one, reuse the App IDs of deleted apps, keep or drop extensions, ask for Increased Memory Limit.
+- **Fast on the device.** Hashing runs on the processor's SHA instructions and signing uses every core.
+- **Your App IDs under control.** See what uses each one, reuse the App IDs of deleted apps or type your own, keep or drop extensions, ask for Increased Memory Limit (later too: an update keeps it).
+- **Your own app icons.** Pick any picture as an app's icon when you install it, or change it later.
+- **Install into LiveContainer.** Send an app from Featured or an IPA from Files straight into LiveContainer, or give LiveContainer one of your sources.
 - **Works with the other tools.** SideStore, AltStore, LiveContainer + SideStore and StikDebug get the pairing file; the stores and LiveContainer get the signing certificate, so they can refresh themselves too.
 
 ## Install
