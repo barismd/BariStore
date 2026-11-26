@@ -30,7 +30,7 @@ pub struct Control {
 
 #[derive(Debug)]
 pub enum VerifyError {
-    /// The iPhone no longer knows this host: pair again.
+    /// The device no longer knows this host: pair again.
     NotPaired,
     Other(String),
 }
@@ -38,7 +38,7 @@ pub enum VerifyError {
 impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VerifyError::NotPaired => write!(f, "this iPhone no longer accepts BariStore's pairing; pair again"),
+            VerifyError::NotPaired => write!(f, "this device no longer accepts BariStore's pairing; pair again"),
             VerifyError::Other(s) => write!(f, "{s}"),
         }
     }
@@ -67,7 +67,7 @@ impl Control {
         let mut head = [0u8; 11];
         self.stream.read_exact(&mut head).await.map_err(other)?;
         if &head[..9] != b"RPPairing" {
-            return Err(other("the iPhone did not answer with RPPairing framing"));
+            return Err(other("the device did not answer with RPPairing framing"));
         }
         let mut body = vec![0u8; u16::from_be_bytes([head[9], head[10]]) as usize];
         self.stream.read_exact(&mut body).await.map_err(other)?;
@@ -163,11 +163,11 @@ impl Control {
             .ok_or_else(|| other(format!("no encrypted reply: {reply}")))?;
         let opened = self.server.as_ref().unwrap()
             .decrypt(Nonce::from_slice(&nonce), Payload { msg: &B64.decode(data).map_err(other)?, aad: b"" })
-            .map_err(|_| other("cannot decrypt the iPhone's reply"))?;
+            .map_err(|_| other("cannot decrypt the device's reply"))?;
         self.encrypted_sequence += 1;
         let value: Json = serde_json::from_slice(&opened).map_err(other)?;
         value.pointer("/response/_1").cloned()
-            .ok_or_else(|| other(format!("the iPhone refused the request: {value}")))
+            .ok_or_else(|| other(format!("the device refused the request: {value}")))
     }
 
     pub async fn create_tcp_listener(&mut self) -> Result<u16, VerifyError> {

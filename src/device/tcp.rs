@@ -310,7 +310,7 @@ impl Actor {
             return;
         }
         if flags & RST != 0 {
-            self.fail(dst, "the iPhone reset the connection");
+            self.fail(dst, "the device reset the connection");
             return;
         }
         if c.state == State::SynSent {
@@ -404,7 +404,7 @@ impl Actor {
             let c = &self.conns[&id];
             if c.state == State::SynSent {
                 if now > c.syn_deadline {
-                    self.fail(id, "the iPhone did not answer the TCP connection (service port closed?)");
+                    self.fail(id, "the device did not answer the TCP connection (service port closed?)");
                 } else if now >= c.retransmit_at {
                     self.segment(id, c, SYN, c.iss, &[], &self.syn_options());
                     let c = self.conns.get_mut(&id).unwrap();
@@ -485,7 +485,7 @@ impl TcpConn {
 
     async fn fill(&mut self) -> std::io::Result<()> {
         if self.eof {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the iPhone closed the connection"));
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the device closed the connection"));
         }
         match self.rx.recv().await {
             Some(Incoming::Data(d)) => {
@@ -494,7 +494,7 @@ impl TcpConn {
             }
             Some(Incoming::Eof) | None => {
                 self.eof = true;
-                Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the iPhone closed the connection"))
+                Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the device closed the connection"))
             }
             Some(Incoming::Error(e)) => Err(broken(e)),
         }
@@ -655,7 +655,7 @@ mod tests {
 #[cfg(test)]
 mod interop {
     //! Our stack against smoltcp, an independent TCP/IPv6 implementation that
-    //! plays the iPhone: it listens, echoes everything back, and we check a
+    //! plays the device: it listens, echoes everything back, and we check a
     //! large transfer arrives intact in both directions.
     use super::*;
     use smoltcp::iface::{Config, Interface, SocketSet};

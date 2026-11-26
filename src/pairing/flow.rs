@@ -1,7 +1,7 @@
 //! One pairing run inside Open Minis: advertise through minis-bonjour, keep
 //! Minis alive (silent speech, or the player) while the user is in Settings,
 //! and make the code
-//! only when the iPhone asks for it (after "Pair with BariStore" and the
+//! only when the device asks for it (after "Pair with BariStore" and the
 //! passcode): then it goes out as a notification, which the user sees over
 //! Settings. Up to three tries, each with a new code.
 

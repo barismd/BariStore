@@ -183,11 +183,6 @@ const T = location.pathname.replace(/\/$/, "");
 let S = null, C = { apps: [], sources: [], suggested: [], refreshing: false };
 let tab = "featured", query = "", detail = null, sheet = null;
 const $ = (s) => document.querySelector(s);
-/** "iPad" on an iPad (its web view says Macintosh, but has touch), else "iPhone": the page's words follow the
- *  device, BariStore's messages too (dev). */
-const DEVICE = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
-  ? "iPad" : "iPhone";
-const dev = (text) => String(text ?? "").replace(/\biPhone\b/g, DEVICE);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 /** fetch with a deadline: a server that hangs must not leave the page waiting forever. */
@@ -200,7 +195,7 @@ async function timed(url, init, ms) {
 async function api(path, ms = 5000) { const r = await timed(T + path, {}, ms); return r.json(); }
 async function act(action, extra = {}) {
   try {
-    // Some answers wait for the iPhone or Apple (connection check, App IDs).
+    // Some answers wait for the device or Apple (connection check, App IDs).
     const r = await timed(T + "/api/action", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, ...extra }) }, 120000);
     const j = await r.json();
@@ -213,7 +208,7 @@ async function act(action, extra = {}) {
 }
 function toast(msg) {
   document.querySelectorAll(".toast").forEach((t) => t.remove());
-  const t = document.createElement("div"); t.className = "toast"; t.textContent = dev(msg);
+  const t = document.createElement("div"); t.className = "toast"; t.textContent = msg;
   document.body.appendChild(t); setTimeout(() => t.remove(), 3200);
 }
 
@@ -233,7 +228,7 @@ function iconHtml(app, big) {
 function pic(url, dropBox) {
   return `<img class="fade" data-src="${esc(url)}" alt="" decoding="async"${dropBox ? ' data-drop="1"' : ""}>`;
 }
-/** A few pictures at a time, those near the screen first: BariStore makes each one ready on the iPhone, and
+/** A few pictures at a time, those near the screen first: BariStore makes each one ready on the device, and
  *  dozens at once only made every one of them slow. Icons have a wider lane of their own: they are small and made
  *  ready after each catalog refresh, and Featured's short tiles show many at once. */
 const LANES = { icon: { max: 8, busy: 0, queue: [] }, shot: { max: 3, busy: 0, queue: [] } };
@@ -296,6 +291,9 @@ function timeLeft(expires) {
 function dateText(unix, year) {
   return unix ? new Date(unix * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", ...(year ? { year: "numeric" } : {}) }) : "";
 }
+/** A free Apple ID's team (10 App IDs a week, 7-day apps, 3 apps on a device); a paid one has none of these
+ *  limits. Unknown until BariStore asked Apple: free. */
+function freeTeam() { return S.setup.free !== false; }
 /** Apps that read BariStore's pairing file (install.rs reads_pairing_file). */
 const PAIRING_KINDS = ["sidestore", "altstore", "livecontainer+sidestore", "stikdebug"];
 const tabIcons = {
@@ -329,7 +327,7 @@ function pairingHow() {
     <li>Open <b>Settings › Privacy & Security › Developer Mode</b>. It is there now, even if it was not before.</li>
     <li>At the bottom, tap <b>Pair with BariStore</b> and enter your passcode.</li>
     <li>Type the 6-digit code from the notification.</li>
-    <li>If Developer Mode is off, turn it on there (the ${DEVICE} restarts).</li></ol>`;
+    <li>If Developer Mode is off, turn it on there (the device restarts).</li></ol>`;
 }
 
 function setupView() {
@@ -340,27 +338,27 @@ function setupView() {
   const other = S.vpn_message && !S.vpn_message.startsWith("No connection");
   const s1 = st.vpn == null ? `Checking LocalDevVPN…`
     : `Connect <b>LocalDevVPN</b> (App Store) on Wi-Fi. BariStore continues by itself.
-     ${other ? `<div class="notice bad">${esc(dev(S.vpn_message))}</div>` : ""}
+     ${other ? `<div class="notice bad">${esc(S.vpn_message)}</div>` : ""}
      <button class="btn secondary" onclick="check()">Check again</button>`;
   const s2 = `Settings shows where to tap once you start.
      <button class="btn" onclick="act('pair')">Start pairing</button>`;
   const s3 = `<div style="display:flex;gap:10px;align-items:flex-start"><div class="grow">Sign in with your Apple ID. A free one is enough.</div>
        <button class="gear" onclick="openAnisette()" aria-label="Anisette server">${GEAR}</button></div>
-     ${st.devmode === false ? `<div class="notice">Developer Mode is off: turn it on in Settings › Privacy & Security › Developer Mode (the ${DEVICE} restarts).</div>` : ""}
+     ${st.devmode === false ? `<div class="notice">Developer Mode is off: turn it on in Settings › Privacy & Security › Developer Mode (the device restarts).</div>` : ""}
      <input class="field" id="email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Apple ID email" value="${esc(st.email)}">
      <input class="field" id="password" type="password" autocomplete="current-password" placeholder="Password">
      <button class="btn" onclick="login()">Sign in</button>
-     <div class="small muted" style="margin-top:10px">Your password stays on this ${DEVICE} and is never saved.</div>`;
+     <div class="small muted" style="margin-top:10px">Your password stays on this device and is never saved.</div>`;
   return `<div class="wrap">
-    <header class="top"><img src="logo.svg" alt=""><div><div style="font-weight:700;font-size:20px">BariStore</div><div class="muted small">Set up this ${DEVICE}</div></div></header>
+    <header class="top"><img src="logo.svg" alt=""><div><div style="font-weight:700;font-size:20px">BariStore</div><div class="muted small">Set up this device</div></div></header>
     <div class="card pad"><ol class="steps">
       ${li(1, "Wi-Fi and LocalDevVPN", s1)}
-      ${li(2, `Pair this ${DEVICE}`, s2)}
+      ${li(2, `Pair this device`, s2)}
       ${li(3, "Apple ID", s3)}
       ${li(4, "Done", `<button class="btn" onclick="act('settings',{settings:{setup_done:true}})">Open the store</button>`)}
     </ol></div>
-    ${paired ? `<div class="small muted" style="text-align:center">Paired with ${esc(st.device_name || "this " + DEVICE)}</div>` : ""}
-    <button class="link bad" style="text-align:center" onclick="ask({title:'Start again?', message:'BariStore forgets the pairing, the Apple ID session and its settings, and setup starts from the beginning. Apps stay on the ${DEVICE}.', ok:'Start again', danger:true, run:reset})">Start again</button>
+    ${paired ? `<div class="small muted" style="text-align:center">Paired with ${esc(st.device_name || "this device")}</div>` : ""}
+    <button class="link bad" style="text-align:center" onclick="ask({title:'Start again?', message:'BariStore forgets the pairing, the Apple ID session and its settings, and setup starts from the beginning. Apps stay on the device.', ok:'Start again', danger:true, run:reset})">Start again</button>
   </div>`;
 }
 async function check() { const r = await act("check"); S.vpn_message = r.ok ? "" : r.message; render(); }
@@ -458,7 +456,8 @@ function listHtml() {
   // Recommended until it is installed.
   const recommended = searching || category ? [] : C.apps.filter((a) => a.recommended && !isInstalled(a));
   const title = searching ? "Results" : category ? CATEGORIES.find(([k]) => k === category)[1] : "All apps";
-  const errors = C.sources.filter((s) => s.error);
+  // The errors of the fetch that ended, not while a new one runs.
+  const errors = C.refreshing ? [] : C.sources.filter((s) => s.error);
   return `${recommended.length ? `<h2>Recommended</h2><div class="hero">${recommended.map(heroRow).join("")}</div>` : ""}
     <h2>${title} ${C.refreshing ? '<span class="muted small">updating…</span>' : ""}</h2>
     ${apps.length ? `<div class="grid">${apps.slice(0, shown).map(tile).join("")}</div>${apps.length > shown ? '<div id="more" class="more"><span class="spin"></span></div>' : ""}`
@@ -548,8 +547,8 @@ async function loadIpaInfo() {
  *  - copies of it BariStore installed: Replace (the new build goes over one as an update: its App IDs, its data);
  *  - its own App ID (identifier + team) when there is one: free, it is taken again (what a new one would be);
  *    installed under it another way, Replace; another app reused it, an option that replaces that app;
- *  - New App ID (one no app on the iPhone is installed under);
- *  - App IDs of apps no longer on the iPhone. */
+ *  - New App ID (one no app on the device is installed under);
+ *  - App IDs of apps not on this device. */
 function idChoices(app) {
   const team = S.setup.team, ids = S.app_ids, list = ids?.list || [];
   const own = app.bundle_id.endsWith("." + team) ? app.bundle_id : app.bundle_id + "." + team;
@@ -562,11 +561,11 @@ function idChoices(app) {
   if (mine && !copies.some((i) => i.bundle_id === own)) {
     if (!mine.app) out.push({ id: own, title: "Its own App ID", note: own + until(mine), hint: "Made for it before and free again." });
     else if (!mine.note.startsWith("used by")) out.push({ id: own, replace: true, title: `Replace ${mine.app}`, note: own,
-      hint: `${mine.app} is on this ${DEVICE} under its own App ID. It is updated in place: its data stays.` });
+      hint: `${mine.app} is on this device under its own App ID. It is updated in place: its data stays.` });
     else other = { id: own, title: "Its own App ID", note: own,
       warn: `${mine.app} is installed under it now: installing replaces ${mine.app}.` };
   }
-  if (!mine || mine.app) out.push({ id: "", title: "New App ID", note: ids?.list ? `${ids.left} of ${ids.max} left` : "" });
+  if (!mine || mine.app) out.push({ id: "", title: "New App ID", note: ids?.list && ids.free ? `${ids.left} of ${ids.max} left` : "" });
   if (other) out.push(other);
   for (const a of list) {
     if (!a.app && a.identifier !== own && !copies.some((i) => i.bundle_id === a.identifier)) {
@@ -624,8 +623,8 @@ function installOptionsHtml(app) {
   const shown = opts.icon ? { name: app.name, icon_url: opts.icon_url } : app;
   return `<h2>Options</h2>
     <div class="card">
-      ${toggleRow("opt:remove_extensions", "Remove extensions", "Uses fewer App IDs (a free Apple ID has 10). Widgets and share sheets of this app stop working.", opts.remove_extensions)}
-      ${toggleRow("opt:increased_memory", "Increased Memory Limit", `More memory for emulators and LiveContainer, where the ${DEVICE} supports it.`, opts.increased_memory)}
+      ${toggleRow("opt:remove_extensions", "Remove extensions", `${freeTeam() ? "Uses fewer App IDs (a free Apple ID has 10). " : ""}Widgets and share sheets of this app stop working.`, opts.remove_extensions)}
+      ${toggleRow("opt:increased_memory", "Increased Memory Limit", `More memory for emulators and LiveContainer, where the device supports it.`, opts.increased_memory)}
       <div class="row">${iconHtml(shown)}<div class="grow"><div>App icon</div>
         <div class="muted small">${opts.icon ? "Your picture" : "The app's own"}</div></div>
         ${opts.icon ? `<button class="pill quiet" onclick="opts.icon='';opts.icon_url='';renderSheet()">Reset</button>` : ""}
@@ -678,7 +677,7 @@ function squareIcon(file) {
     img.src = url;
   });
 }
-/** Whether LiveContainer is on this iPhone, whoever installed it (the iPhone's app list, asked when BariStore
+/** Whether LiveContainer is on this device, whoever installed it (the device's app list, asked when BariStore
  *  connects and with the App IDs; BariStore's own list before that): Install to LiveContainer is offered then
  *  (`app`: not for LiveContainer itself). */
 function hasLiveContainer(app) {
@@ -850,8 +849,8 @@ function myAppsView() {
   return `<div class="wrap">
     ${header("My Apps", `<button class="pill quiet" onclick="openSheet({kind:'updates'})">Updates${n ? `<span class="badge">${n}</span>` : ""}</button>
       ${list.length ? `<button class="pill" onclick="act('refresh_all')">Refresh all</button>` : ""}`)}
-    <div class="card">${apps || `<div class="empty">Apps you install from BariStore appear here.<br>A free Apple ID keeps them for 7 days: refresh them before that.</div>`}</div>
-    <div class="small muted" style="text-align:center;margin-bottom:6px">A free Apple ID can have 3 of these apps at a time. BariStore itself runs in Minis and does not count.</div>
+    <div class="card">${apps || `<div class="empty">Apps you install from BariStore appear here.<br>${freeTeam() ? "A free Apple ID keeps them for 7 days: refresh them before that." : "Refresh them before they expire."}</div>`}</div>
+    ${freeTeam() ? `<div class="small muted" style="text-align:center;margin-bottom:6px">A free Apple ID can have 3 of these apps at a time. BariStore itself runs in Minis and does not count.</div>` : ""}
     ${appIdsHtml()}
   </div>`;
 }
@@ -892,10 +891,10 @@ function appIdsHtml() {
   }
   const rows = ids.list.slice().sort((a, b) => a.expires - b.expires).map((a) => `<div class="row"><div class="grow">
       <div class="ell">${esc(a.title || a.name)}${a.note ? `<span class="tag">${esc(a.note)}</span>` : ""}</div><div class="ell muted small">${esc(a.identifier)}</div></div>
-      <div class="small muted" style="text-align:right">${a.app ? "" : '<div class="note" style="margin:0">Free to reuse</div>'}${a.expires ? "until " + esc(dateText(a.expires)) : ""}</div></div>`).join("");
-  return `<h2>App IDs <span class="muted small" style="font-weight:400">${ids.left} of ${ids.max} left</span></h2>
+      <div class="small muted" style="text-align:right">${a.app ? "" : '<div class="note" style="margin:0">Not on this device</div>'}${a.expires ? "until " + esc(dateText(a.expires)) : ""}</div></div>`).join("");
+  return `<h2>App IDs ${ids.free ? `<span class="muted small" style="font-weight:400">${ids.left} of ${ids.max} left</span>` : ""}</h2>
     <div class="card">${rows || '<div class="empty">No App IDs yet.</div>'}</div>
-    <div class="small muted" style="text-align:center">Each app and each of its extensions needs one. They free up 7 days after they were made.</div>`;
+    <div class="small muted" style="text-align:center">Each app and each of its extensions needs one.${ids.free ? " They free up 7 days after they were made." : ""}</div>`;
 }
 function appMenuSheet(id) {
   const i = (S.installed || []).find((x) => x.bundle_id === id) || { name: id, bundle_id: id, options: {}, ids: {} };
@@ -960,7 +959,7 @@ async function setChannel(id, channel) {
   if (!r.ok) toast(r.message);
 }
 function deleteApp(id, name) {
-  ask({ title: `Delete ${name}?`, message: `It is removed from this ${DEVICE} with its data.`, ok: "Delete", danger: true,
+  ask({ title: `Delete ${name}?`, message: `It is removed from this device with its data.`, ok: "Delete", danger: true,
     run: () => act("delete", { bundle_id: id, name }) });
 }
 
@@ -996,8 +995,9 @@ function optionsView() {
       <div class="row"><div class="grow">BariStore</div><div class="muted">${esc(S.version)}</div></div>
       <div class="row"><button class="link" onclick="act('update')">Update BariStore</button></div>
       <div class="row"><button class="link" onclick="showLog()">Log</button></div>
-      <div class="row"><button class="link" onclick="ask({title:'Clear the cache?', message:'Deletes every IPA (downloaded and added), icons and the copy of the catalog. Installed apps stay. One signed again later is downloaded again; an added one must be added again.', ok:'Clear cache', run:clearCache})">Clear cache${cacheBytes != null ? ` <span class="muted small">(${Math.round(cacheBytes / 1e6)} MB)</span>` : ""}</button></div>
-      <div class="row"><button class="link bad" onclick="ask({title:'Reset BariStore?', message:'BariStore forgets the Apple ID session, the pairing, sources, settings and its app list, and starts setup again. Apps stay on the ${DEVICE}.', ok:'Reset', danger:true, run:reset})">Reset BariStore</button></div>
+      <div class="row"><button class="link" onclick="confirmClearCache()">Clear cache${mbText(cacheBytes)}</button></div>
+      <div class="row"><button class="link bad" onclick="confirmClearIpas()">Clear stored IPAs${mbText(ipaBytes)}</button></div>
+      <div class="row"><button class="link bad" onclick="ask({title:'Reset BariStore?', message:'BariStore forgets the Apple ID session, the pairing, sources, settings and its app list, and starts setup again. Apps stay on the device.', ok:'Reset', danger:true, run:reset})">Reset BariStore</button></div>
       <div class="row"><button class="link bad" onclick="quit()">Quit BariStore</button></div>
     </div>
     <p class="small muted" style="text-align:center">MIT licence. No accounts, no analytics: BariStore talks only to Apple, the anisette server and the sources you add.</p>
@@ -1089,7 +1089,7 @@ async function exportPairing() {
   const r = await act("export_pairing");
   if (!r.ok) { toast(r.message); return; }
   openSheet({ kind: "share", file: r.file, title: "Pairing file",
-    note: `SideStore, StikDebug and other tools use this file to reach this ${DEVICE}. Keep it private.` });
+    note: `SideStore, StikDebug and other tools use this file to reach this device. Keep it private.` });
 }
 /** The share sheet for a file from BariStore (Save to Files, AirDrop, another app). Called
  *  straight from a tap: iOS shows the sheet only during one. */
@@ -1123,8 +1123,42 @@ function certsSheet() {
     body: `<p class="muted small">Your Apple ID's development certificates. It has room for only a few: when an install says it is full, revoke one you no longer use here.</p>
       <div class="card">${sheet.error ? `<div class="empty">${esc(sheet.error)}</div>` : !sheet.list ? '<div class="empty">Loading…</div>'
         : rows || '<div class="empty">None yet: BariStore makes one with the first install.</div>'}</div>`,
-    foot: `<button class="btn secondary" onclick="closeSheet();act('export_certificate')">Export BariStore's certificate (.p12)</button>`,
+    foot: `<button class="btn secondary" onclick="closeSheet();act('export_certificate')">Export BariStore's certificate (.p12)</button>
+      <button class="btn secondary" onclick="pickP12()">Import a certificate (.p12)</button>`,
   };
+}
+/** Import: a .p12 exported by BariStore on another device, and its password. */
+function pickP12() {
+  document.querySelectorAll("input.picker").forEach((i) => i.remove());
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = ".p12,application/x-pkcs12"; input.className = "picker";
+  document.body.appendChild(input);
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    input.remove();
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => openSheet({ kind: "p12", name: file.name, base64: String(reader.result).split(",")[1] || "" });
+    reader.onerror = () => toast("That file cannot be read.");
+    reader.readAsDataURL(file);
+  });
+  input.addEventListener("cancel", () => input.remove());
+  input.click();
+}
+function p12Sheet() {
+  return {
+    title: "Import a certificate",
+    body: `<p class="ell" style="font-weight:600">${esc(sheet.name)}</p>
+      <p class="muted small">The password BariStore showed when it exported the file.</p>
+      <input class="field" id="p12pass" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Password">`,
+    foot: `<button class="btn" onclick="importP12()">Import</button>`,
+  };
+}
+function importP12() {
+  const password = $("#p12pass").value.trim(), base64 = sheet.base64;
+  if (!password) { toast("Enter the file's password."); return; }
+  closeSheet();
+  act("import_certificate", { base64, password });
 }
 function revokeCert(serial, name) {
   ask({ title: `Revoke ${name}?`, message: "Apps signed with it stop opening until they are installed again.", ok: "Revoke", danger: true,
@@ -1138,9 +1172,19 @@ async function quit() {
   $("#root").innerHTML = `<div class="wrap"><div class="empty" style="padding-top:30vh"><img src="logo.svg" alt="" width="56"><p>BariStore is closed.<br>Close this page. Type <b>baristore</b> in Minis to open it again.</p></div></div>`;
   S = null;
 }
-let cacheBytes = null;
-async function loadCacheSize() { const r = await act("cache_size"); if (r.ok) { cacheBytes = r.bytes; render(); } }
-async function clearCache() { const r = await act("clear_cache"); toast(r.message); loadCatalog(); loadCacheSize(); }
+let cacheBytes = null, ipaBytes = null;
+const mbText = (bytes) => bytes != null ? ` <span class="muted small">(${Math.round(bytes / 1e6)} MB)</span>` : "";
+async function loadCacheSize() { const r = await act("cache_size"); if (r.ok) { cacheBytes = r.cache; ipaBytes = r.ipas; render(); } }
+async function clearFiles(action) { const r = await act(action); toast(r.message); loadCatalog(); loadCacheSize(); }
+/** Clear cache keeps the IPAs installed apps are signed from; Clear stored IPAs deletes only those. */
+function confirmClearCache() {
+  ask({ title: "Clear the cache?", message: "Deletes pictures, the copy of the catalog and downloads no installed app needs. Installed apps and their stored IPAs stay.",
+    ok: "Clear cache", run: () => clearFiles("clear_cache") });
+}
+function confirmClearIpas() {
+  ask({ title: "Clear stored IPAs?", message: "Deletes the IPA BariStore keeps for each installed app. The apps stay, but without their IPA: Increased Memory Limit or a new icon waits for the next update, a new certificate downloads the app again, and an IPA you added must be added again.",
+    ok: "Clear stored IPAs", danger: true, run: () => clearFiles("clear_ipas") });
+}
 async function showLog(checks) {
   openSheet({ kind: "log", text: checks ? "Running checks (network, tunnel, Apple sign-in)…" : "Loading…" });
   const r = await act(checks ? "checks" : "log");
@@ -1163,9 +1207,9 @@ function taskSheet(task) {
   const code = S.pairing_code;
   const pairing = S.pairing_waiting && !task.done;
   return {
-    title: dev(task.title), closable: task.done,
+    title: task.title, closable: task.done,
     body: `${code && !task.done ? `<div class="muted small" style="text-align:center;margin-top:12px">Pairing code</div><div class="code">${esc(code.slice(0, 3))} ${esc(code.slice(3))}</div>` : ""}
-      ${task.error ? `<div class="notice bad" style="white-space:pre-wrap">${esc(dev(task.error))}</div>` : `<p>${esc(dev(task.step || "Working…"))}</p>`}
+      ${task.error ? `<div class="notice bad" style="white-space:pre-wrap">${esc(task.error)}</div>` : `<p>${esc(task.step || "Working…")}</p>`}
       ${task.done && task.next?.share?.password ? `<div class="secret">${esc(task.next.share.password)}</div>` : ""}
       ${task.done ? "" : `<div class="bar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 35}%"></i></div>`}
       ${pairing && !code ? pairingHow() : ""}`,
@@ -1183,7 +1227,7 @@ function questionSheet(q) {
        <button class="btn" onclick="answer(${q.id}, $('#answer').value)">Continue</button>
        ${(q.options || []).includes("sms") ? `<button class="btn secondary" onclick="answer(${q.id}, 'sms')">No code? Send a text message</button>` : ""}
        <button class="btn secondary" onclick="answer(${q.id}, null)">Cancel</button>`;
-  return { title: dev(q.title), body: `<p class="muted">${esc(dev(q.message))}</p>${body}` };
+  return { title: q.title, body: `<p class="muted">${esc(q.message)}</p>${body}` };
 }
 function sheetParts() {
   const q = S?.question, task = S?.task;
@@ -1207,6 +1251,7 @@ function sheetParts() {
     case "upload": return { key: "upload", ...uploadSheet() };
     case "local": return { key: "local", closable: true, ...localSheet(sheet.ipa) };
     case "certs": return { key: "certs", closable: true, ...certsSheet() };
+    case "p12": return { key: "p12", closable: true, ...p12Sheet() };
     case "share": return { key: "share", closable: true, title: sheet.title, body: `<p class="muted">${esc(sheet.note)}</p>`,
       foot: `<button class="btn" onclick="shareFile(sheet.file)">Share</button>` };
   }

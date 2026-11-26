@@ -1,4 +1,4 @@
-//! One live connection to this iPhone: control channel + TLS-PSK CDTunnel +
+//! One live connection to this device: control channel + TLS-PSK CDTunnel +
 //! our TCP stack + RSD service map. LocalDevVPN loops 10.7.0.1 back to the
 //! device's own RemotePairing service (port 49152, or another dynamic port).
 
@@ -36,7 +36,7 @@ impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OpenError::NoVpn(why) => write!(f, "{why}"),
-            OpenError::NotPaired => write!(f, "this iPhone no longer accepts BariStore's pairing; pair again"),
+            OpenError::NotPaired => write!(f, "this device no longer accepts BariStore's pairing; pair again"),
             OpenError::Failed(why) => write!(f, "{why}"),
         }
     }
@@ -59,11 +59,18 @@ pub fn host_uuid() -> [u8; 16] {
 /// at once; without it the connection goes nowhere.
 pub async fn vpn_up() -> bool {
     let (host, port) = override_endpoint().unwrap_or((LOOPBACK.to_string(), PAIRING_PORT));
-    match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect((host.as_str(), port))).await {
-        Ok(Ok(_)) => true,
-        Ok(Err(e)) => e.kind() == std::io::ErrorKind::ConnectionRefused,
-        Err(_) => false,
+    // Up to three tries on new sockets: back in the foreground, the first
+    // connection can go nowhere while LocalDevVPN comes back (the owner's
+    // second try a few seconds later always connected, 1.1.0).
+    for _ in 0..3 {
+        match tokio::time::timeout(Duration::from_millis(2500), TcpStream::connect((host.as_str(), port))).await {
+            Ok(Ok(_)) => return true,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => return true,
+            Ok(Err(_)) => tokio::time::sleep(Duration::from_millis(500)).await,
+            Err(_) => {}
+        }
     }
+    false
 }
 
 /// BARISTORE_DEVICE=host:port points at a mock device in tests.
@@ -108,7 +115,7 @@ async fn knock(host: &str, port: u16, answer: Duration) -> Knock {
     if answered { Knock::Answered } else { Knock::Closed }
 }
 
-pub const NO_ROUTE: &str = "No connection to the iPhone: turn on Wi-Fi and connect LocalDevVPN.";
+pub const NO_ROUTE: &str = "No connection to the device: turn on Wi-Fi and connect LocalDevVPN.";
 
 /// Where the RemotePairing service answers. Usually 49152, but iOS takes
 /// the first free dynamic port at boot, so when that one is not it, the
@@ -147,7 +154,7 @@ pub async fn endpoint() -> Result<(String, u16), OpenError> {
             return Err(OpenError::NoVpn(NO_ROUTE.into()));
         }
     }
-    Err(OpenError::Failed("LocalDevVPN is connected, but the iPhone does not answer. Restart the iPhone and try \
+    Err(OpenError::Failed("LocalDevVPN is connected, but the device does not answer. Restart the device and try \
         again.".into()))
 }
 
@@ -272,7 +279,7 @@ impl Session {
                 return Ok(*p);
             }
         }
-        Err(format!("the iPhone does not offer {} (Developer Mode off?)", names[0]))
+        Err(format!("the device does not offer {} (Developer Mode off?)", names[0]))
     }
 
     pub async fn connect(&self, names: &[&str]) -> Result<TcpConn, String> {

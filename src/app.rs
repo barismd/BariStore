@@ -44,6 +44,9 @@ pub struct Setup {
     pub email: String,
     pub team: String,
     pub team_name: String,
+    /// Whether the team is a free one (None: not asked yet, see
+    /// `team_checked`); the page words the limits after it.
+    pub free: Option<bool>,
     pub udid: String,
     pub device_name: String,
 }
@@ -100,9 +103,14 @@ impl App {
                 i.setup.email = a.email;
             }
             if let Ok(t) = std::fs::read_to_string(state::path("team")) {
-                let mut parts = t.splitn(2, '\n');
-                i.setup.team = parts.next().unwrap_or("").trim().into();
-                i.setup.team_name = parts.next().unwrap_or("").trim().into();
+                let mut lines = t.lines();
+                i.setup.team = lines.next().unwrap_or("").trim().into();
+                i.setup.team_name = lines.next().unwrap_or("").trim().into();
+                i.setup.free = match lines.next().map(str::trim) {
+                    Some("free") => Some(true),
+                    Some("paid") => Some(false),
+                    _ => None,
+                };
             }
         }
         prune_files();
@@ -122,7 +130,7 @@ impl App {
             "pairing_waiting": i.pairing_waiting,
             "pairing_keepalive": i.pairing_keepalive,
             "settings": state::settings(),
-            // With the icon the app on the iPhone has, and whether its IPA
+            // With the icon the app on the device has, and whether its IPA
             // is still here (a change to it can be signed in at once).
             "installed": install::installed().into_iter().map(|e| {
                 let mut v = json!(e);
@@ -262,7 +270,8 @@ impl App {
             // Bounded: after Minis was in the background, a tunnel iOS took
             // away may never answer.
             let alive = tokio::time::timeout(std::time::Duration::from_secs(10), services::developer_mode(s)).await;
-            if matches!(alive, Ok(Ok(_))) {
+            if let Ok(Ok(dm)) = alive {
+                self.inner.lock().unwrap().setup.devmode = dm;
                 return Ok(s.clone());
             }
             logf!("device: the cached tunnel does not answer; opening a new one");
@@ -271,7 +280,7 @@ impl App {
         if !self.check_vpn().await {
             return Err(session::NO_ROUTE.into());
         }
-        let record = flow::load_record().ok_or("This iPhone is not paired yet.")?;
+        let record = flow::load_record().ok_or("This device is not paired yet.")?;
         // Bounded: on mobile data LocalDevVPN can take a connection and then
         // never answer.
         let s = match tokio::time::timeout(std::time::Duration::from_secs(45), Session::open(&record)).await {
@@ -360,21 +369,6 @@ impl App {
         }
     }
 
-    pub async fn developer_mode(&self, action: Option<u64>) -> Result<String, String> {
-        let s = self.device().await?;
-        if let Some(a) = action {
-            services::amfi_action(&s, a).await?;
-            if a == 1 {
-                *self.session.lock().await = None;
-                return Ok("The iPhone restarts to turn Developer Mode on. Open BariStore again afterwards.".into());
-            }
-            return Ok("Developer Mode is now in Settings › Privacy & Security.".into());
-        }
-        let dm = services::developer_mode(&s).await?;
-        self.inner.lock().unwrap().setup.devmode = dm;
-        Ok(match dm { Some(true) => "Developer Mode is on.", Some(false) => "Developer Mode is off.", None => "Developer Mode: unknown." }.into())
-    }
-
     // --- Apple ----------------------------------------------------------
 
     pub async fn apple(&self) -> Result<Arc<(gsa::GrandSlam, gsa::Account)>, String> {
@@ -424,20 +418,22 @@ impl App {
             0 => return Err("This Apple ID has no developer team".into()),
             1 => teams[0].clone(),
             _ => {
-                let labels: Vec<String> = teams.iter().map(|t| format!("{} ({})", t.name, t.kind)).collect();
+                let labels: Vec<String> = teams.iter()
+                    .map(|t| format!("{} ({})", t.name, if t.free { "free" } else { t.kind.as_str() })).collect();
                 let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
                 let pick = self.ask("choice", "Team", "Which team signs your apps?", &refs).await
                     .ok_or("Cancelled")?;
                 teams.into_iter().zip(labels).find(|(_, l)| *l == pick).map(|(t, _)| t).ok_or("no team chosen")?
             }
         };
-        let _ = std::fs::write(state::path("team"), format!("{}\n{}", team.id, team.name));
+        save_team(&team);
         {
             let mut i = self.inner.lock().unwrap();
             i.setup.signed_in = true;
             i.setup.email = account.email.clone();
             i.setup.team = team.id.clone();
             i.setup.team_name = team.name.clone();
+            i.setup.free = Some(team.free);
         }
         *self.apple.lock().await = Some(Arc::new((gs, account)));
         Ok("Signed in.".into())
@@ -597,15 +593,26 @@ impl App {
         self.refresh_catalog();
     }
 
-    async fn ready_to_install(&self) -> Result<(Arc<Session>, Arc<(gsa::GrandSlam, gsa::Account)>), String> {
+    /// The start of an install, update or refresh: the device (with
+    /// Developer Mode on), the Apple ID and its team.
+    async fn job(&self) -> Result<Job, String> {
         self.step("Connecting");
-        let s = self.device().await?;
-        if services::developer_mode(&s).await? == Some(false) {
-            return Err("Developer Mode is off. Turn it on in Settings › Privacy & Security, then try again.".into());
+        let session = self.device().await?;
+        if self.inner.lock().unwrap().setup.devmode == Some(false) {
+            return Err(DEVMODE_OFF.into());
         }
         self.step("Checking your Apple ID");
         let apple = self.apple().await?;
-        Ok((s, apple))
+        let team = self.team_checked(&apple).await?;
+        let (udid, name) = {
+            let i = self.inner.lock().unwrap();
+            (if session.udid.is_empty() { i.setup.udid.clone() } else { session.udid.clone() }, i.setup.device_name.clone())
+        };
+        if udid.is_empty() {
+            return Err("This device's UDID is unknown. Pair again (Options › Pairing).".into());
+        }
+        Ok(Job { session, apple, team, udid, device_name: if name.is_empty() { "iOS device".into() } else { name },
+                 shared: None, first: false, signed: Vec::new() })
     }
 
     fn team(&self) -> Result<portal::Team, String> {
@@ -613,7 +620,59 @@ impl App {
         if i.setup.team.is_empty() {
             return Err("Sign in to Apple first (Options › Apple ID).".into());
         }
-        Ok(portal::Team { id: i.setup.team.clone(), name: i.setup.team_name.clone(), kind: String::new() })
+        Ok(portal::Team { id: i.setup.team.clone(), name: i.setup.team_name.clone(), kind: String::new(),
+                          free: i.setup.free.unwrap_or(true) })
+    }
+
+    /// The team, with whether it is a free one: asked from Apple once for a
+    /// sign-in from before BariStore kept it (free when Apple does not say).
+    async fn team_checked(&self, apple: &(gsa::GrandSlam, gsa::Account)) -> Result<portal::Team, String> {
+        let mut team = self.team()?;
+        if self.inner.lock().unwrap().setup.free.is_some() {
+            return Ok(team);
+        }
+        match (portal::Portal { gs: &apple.0, account: &apple.1 }).teams().await {
+            Ok(teams) => {
+                team.free = teams.iter().find(|t| t.id == team.id).is_none_or(|t| t.free);
+                save_team(&team);
+                self.inner.lock().unwrap().setup.free = Some(team.free);
+                logf!("apple: the team is {}", if team.free { "a free one" } else { "a paid one" });
+            }
+            Err(e) => logf!("apple: whether the team is free is unknown ({e})"),
+        }
+        Ok(team)
+    }
+
+    /// A download's progress, as the task sheet shows it.
+    fn downloading(&self) -> impl Fn(u64, u64) + Send + Sync {
+        let app = self.clone();
+        move |done, total| {
+            let pct = (done * 100).checked_div(total).unwrap_or(0) as u32;
+            app.progress(format!("Downloading {} of {} MB", done / 1_000_000, total.max(done) / 1_000_000), pct);
+        }
+    }
+
+    /// Questions from install.rs, shown as the page's choice sheet.
+    fn asker(&self) -> Box<install::Asker> {
+        let app = self.clone();
+        Box::new(move |title, message, options| {
+            let app = app.clone();
+            Box::pin(async move {
+                let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+                app.ask("choice", &title, &message, &refs).await
+            })
+        })
+    }
+
+    /// What Apple says once for every app of the task (install::Shared).
+    async fn ensure_shared(&self, job: &mut Job) -> Result<(), String> {
+        if job.shared.is_none() {
+            let ask = self.asker();
+            let portal = portal::Portal { gs: &job.apple.0, account: &job.apple.1 };
+            job.shared = Some(install::shared(&portal, &job.team.id, &job.udid, &job.device_name, &job.session,
+                                              ask.as_ref()).await?);
+        }
+        Ok(())
     }
 
     pub async fn install_version(&self, app_key: &str, version: usize, opts: Options, reuse: install::Reuse)
@@ -625,13 +684,9 @@ impl App {
             let v = entry.versions.get(version).cloned().ok_or("This version is no longer offered.")?;
             (entry, v)
         };
-        let (session, apple) = self.ready_to_install().await?;
-        let app = self.clone();
+        let mut job = self.job().await?;
         let started = std::time::Instant::now();
-        let ipa_path = store::download(&v, &move |done, total| {
-            let pct = if total > 0 { (done * 100 / total) as u32 } else { 0 };
-            app.progress(format!("Downloading {} of {} MB", done / 1_000_000, total.max(done) / 1_000_000), pct);
-        }).await?;
+        let ipa_path = store::download(&v, &self.downloading()).await?;
         logf!("install: downloaded in {:.1} s", started.elapsed().as_secs_f64());
         let bytes = tokio::task::block_in_place(|| std::fs::read(&ipa_path)).map_err(|e| e.to_string())?;
         let mut installed = Installed {
@@ -641,7 +696,8 @@ impl App {
             ..Default::default()
         };
         let reuse = replacing(&mut installed, reuse);
-        self.sign_and_install(&session, &apple, bytes, opts, reuse, installed).await
+        let done = self.sign_and_install(&mut job, bytes, opts, reuse, installed).await?;
+        Ok(done + &self.finish(&job).await)
     }
 
     /// Installs an IPA the user picked (uploaded by the page into ipas/).
@@ -651,46 +707,30 @@ impl App {
             return Err("That file is not one BariStore received.".into());
         }
         let info = crate::sign::bundle::peek(path)?;
-        let (session, apple) = self.ready_to_install().await?;
-        self.step(format!("Reading {}", info.name));
+        let mut job = self.job().await?;
         let bytes = tokio::task::block_in_place(|| std::fs::read(path)).map_err(|e| e.to_string())?;
         let mut installed = Installed {
             original_id: info.id, name: info.name, version: info.version, ipa_path: path.to_string_lossy().into(),
             icon_url: crate::icons::ipa_icon_url(path), ..Default::default()
         };
         let reuse = replacing(&mut installed, reuse);
-        self.sign_and_install(&session, &apple, bytes, opts, reuse, installed).await
+        let done = self.sign_and_install(&mut job, bytes, opts, reuse, installed).await?;
+        Ok(done + &self.finish(&job).await)
     }
 
-    async fn sign_and_install(&self, session: &Session, apple: &(gsa::GrandSlam, gsa::Account), bytes: Vec<u8>,
-                              opts: Options, reuse: install::Reuse, mut entry: Installed) -> Result<String, String> {
-        let team = self.team()?;
-        let (udid, name) = {
-            let i = self.inner.lock().unwrap();
-            (if session.udid.is_empty() { i.setup.udid.clone() } else { session.udid.clone() }, i.setup.device_name.clone())
-        };
-        if udid.is_empty() {
-            return Err("This iPhone's UDID is unknown. Pair again (Options › Pairing).".into());
-        }
-        let app = self.clone();
-        let ask: Box<install::Asker> = Box::new(move |title, message, options| {
-            let app = app.clone();
-            Box::pin(async move {
-                let refs: Vec<&str> = options.iter().map(String::as_str).collect();
-                app.ask("choice", &title, &message, &refs).await
-            })
-        });
+    async fn sign_and_install(&self, job: &mut Job, bytes: Vec<u8>, opts: Options, reuse: install::Reuse,
+                              mut entry: Installed) -> Result<String, String> {
+        let ask = self.asker();
         let previous = (!entry.bundle_id.is_empty()).then(|| (entry.bundle_id.clone(), entry.ids.clone()));
         let ctx = install::Context {
-            gs: &apple.0, account: &apple.1, team: &team, udid: &udid,
-            device_name: if name.is_empty() { "iPhone" } else { &name },
-            session, ask: ask.as_ref(),
-            reuse,
+            gs: &job.apple.0, account: &job.apple.1, team: &job.team, udid: &job.udid, device_name: &job.device_name,
+            session: &job.session, ask: ask.as_ref(), reuse,
             previous: previous.as_ref().map(|(id, ids)| (id.as_str(), ids)),
         };
-        let app = self.clone();
+        let (app, app2) = (self.clone(), self.clone());
         let status = move |s: String| app.step(s);
-        let prepared = install::prepare_and_sign(&ctx, bytes, &opts, &status).await?;
+        let progress = move |s: String, pct: u32| app2.progress(s, pct);
+        let prepared = install::prepare_and_sign(&ctx, &mut job.shared, bytes, &opts, &status, &progress).await?;
         if entry.version.is_empty() {
             entry.version = prepared.version.clone();
         }
@@ -704,38 +744,61 @@ impl App {
         entry.cert_serial = prepared.cert_serial.clone();
         entry.ids = prepared.ids.clone();
         entry.increased_memory = prepared.increased_memory;
-        entry.team = team.id.clone();
+        entry.team = job.team.id.clone();
         entry.expires = prepared.expires;
         entry.custom_icon = opts.icon.clone();
         let opts_memory = opts.increased_memory;
         entry.options = opts;
         let started = std::time::Instant::now();
-        install::install_signed(session, &prepared.ipa, entry.clone(), &status).await?;
+        install::install_signed(&job.session, &prepared.ipa, entry.clone(), &status).await?;
         logf!("install: uploaded and installed {} MB in {:.1} s", prepared.ipa.len() / 1_000_000,
               started.elapsed().as_secs_f64());
         if let Some(record) = flow::load_record().filter(|_| install::reads_pairing_file(&entry.kind)) {
             self.step("Giving the app the pairing file");
-            if let Err(e) = install::place_pairing_file(session, &prepared.main_id, &entry.kind, &record).await {
+            if let Err(e) = install::place_pairing_file(&job.session, &prepared.main_id, &entry.kind, &record).await {
                 logf!("install: pairing file not placed: {e}");
             }
         }
         self.inner.lock().unwrap().app_ids = Json::Null;
-        let first = install::installed().len() <= 1;
+        // A new app and no other: the user has not trusted the Apple ID yet.
+        let first = previous.is_none() && install::installed().len() <= 1;
+        job.first |= first;
+        job.signed.push(entry.bundle_id.clone());
         let memory = if opts_memory && !prepared.increased_memory {
             " Apple did not add Increased Memory Limit to its profile."
         } else { "" };
         let trust = if first {
             " First trust your Apple ID in Settings › General › VPN & Device Management."
         } else { "" };
-        // Right after installing LiveContainer (a refresh keeps what it stored).
-        let livecontainer = entry.kind == install::LIVECONTAINER || entry.kind == install::LIVECONTAINER_SIDESTORE;
-        if livecontainer && previous.is_none() {
-            self.offer_next(json!({"label": "Give LiveContainer the certificate", "action": "lc_certificate",
-                                   "bundle_id": entry.bundle_id, "name": entry.name}));
-            return Ok(format!("{} is installed.{memory}{trust} Then give it the certificate: LiveContainer opens and \
-                               stores it for its JIT-less mode.", entry.name));
-        }
         Ok(format!("{} is installed.{memory}{trust}", entry.name))
+    }
+
+    /// The end of an install, update or refresh: LiveContainer, signed by
+    /// this task with a certificate it was not given yet (its first install,
+    /// a certificate BariStore made since), gets that one for its JIT-less
+    /// mode: it opens and stores it. Before the user trusts the Apple ID (the first app)
+    /// iOS opens nothing, so a button offers it then. What the done message
+    /// adds.
+    async fn finish(&self, job: &Job) -> String {
+        let Some(cert) = job.shared.as_ref().map(|s| &s.cert) else { return String::new() };
+        let Some(lc) = install::installed().into_iter().find(|e| job.signed.contains(&e.bundle_id)
+            && install::takes_certificate(&e.kind) && e.cert_serial == cert.serial && e.lc_cert != cert.serial)
+        else { return String::new() };
+        let offer = || self.offer_next(json!({"label": "Give LiveContainer the certificate", "action": "lc_certificate",
+                                              "bundle_id": lc.bundle_id, "name": lc.name}));
+        if job.first {
+            offer();
+            return format!(" Then give {} the certificate: it opens and stores it for its JIT-less mode.", lc.name);
+        }
+        self.step(format!("Giving {} the certificate", lc.name));
+        match give_certificate(cert).await {
+            Ok(true) => format!(" {} opened and stored the certificate for its JIT-less mode.", lc.name),
+            other => {
+                logf!("livecontainer: the certificate was not sent ({other:?})");
+                offer();
+                format!(" {} needs the new certificate for its JIT-less mode: tap the button below.", lc.name)
+            }
+        }
     }
 
     pub async fn refresh_app(&self, bundle_id: &str) -> Result<String, String> {
@@ -752,52 +815,47 @@ impl App {
         self.refresh(list).await
     }
 
+    /// Asks Apple once for what every app needs; apps deleted on the device
+    /// are forgotten (never installed again, their App IDs left to expire).
     /// Every app that can takes the quick refresh, all in one pass (new
     /// profiles, nothing signed or uploaded); the others are signed and
-    /// installed again, one after another.
+    /// installed again, one after another, with what Apple already said.
     async fn refresh(&self, list: Vec<Installed>) -> Result<String, String> {
         let single = (list.len() == 1).then(|| list[0].name.clone());
-        let (session, apple) = self.ready_to_install().await?;
-        let team = self.team()?;
-        let (udid, device) = {
-            let i = self.inner.lock().unwrap();
-            (if session.udid.is_empty() { i.setup.udid.clone() } else { session.udid.clone() }, i.setup.device_name.clone())
-        };
+        let mut job = self.job().await?;
         let started = std::time::Instant::now();
+        self.step("Checking the certificate, App IDs and apps");
+        self.ensure_shared(&mut job).await?;
         let app = self.clone();
         let status = move |s: String| app.step(s);
-        let portal = portal::Portal { gs: &apple.0, account: &apple.1 };
-        let quick = install::refresh_profiles(&portal, &team.id, &udid, if device.is_empty() { "iPhone" } else { &device },
-                                              &session, &list, &status).await;
-        let mut slow = Vec::new();
-        let mut done = 0;
-        match quick {
-            Ok(results) => {
-                let mut saved = install::installed();
-                for (entry, result) in list.into_iter().zip(results) {
-                    match result {
-                        Ok(r) => {
-                            logf!("refresh: {}: new profiles installed, nothing re-signed", entry.name);
-                            if let Some(e) = saved.iter_mut().find(|e| e.bundle_id == entry.bundle_id) {
-                                e.expires = r.expires;
-                                e.cert_serial = r.cert_serial;
-                            }
-                            done += 1;
+        let (gone, mut refreshed, slow) = {
+            let shared = job.shared.as_ref().ok_or("no answer from Apple")?;
+            let gone = self.forget_missing(&shared.on_device);
+            let list: Vec<Installed> = list.into_iter().filter(|e| !gone.iter().any(|g| g.bundle_id == e.bundle_id)).collect();
+            let portal = portal::Portal { gs: &job.apple.0, account: &job.apple.1 };
+            let results = install::refresh_profiles(&portal, &job.team.id, &job.session, &list, shared, &status).await;
+            let (mut refreshed, mut slow) = (Vec::new(), Vec::new());
+            let mut saved = install::installed();
+            for (entry, result) in list.into_iter().zip(results) {
+                match result {
+                    Ok(r) => {
+                        logf!("refresh: {}: new profiles installed, nothing re-signed", entry.name);
+                        if let Some(e) = saved.iter_mut().find(|e| e.bundle_id == entry.bundle_id) {
+                            e.expires = r.expires;
+                            e.cert_serial = r.cert_serial;
                         }
-                        Err(why) => {
-                            logf!("refresh: {}: quick refresh not possible ({why}); signing again", entry.name);
-                            slow.push(entry);
-                        }
+                        refreshed.push(entry.bundle_id);
+                    }
+                    Err(why) => {
+                        logf!("refresh: {}: quick refresh not possible ({why}); signing again", entry.name);
+                        slow.push(entry);
                     }
                 }
-                install::save_installed(&saved);
-                logf!("refresh: {done} app(s) by new profiles in {:.1} s", started.elapsed().as_secs_f64());
             }
-            Err(e) => {
-                logf!("refresh: quick refresh not possible ({e}); signing again");
-                slow = list;
-            }
-        }
+            install::save_installed(&saved);
+            logf!("refresh: {} app(s) by new profiles in {:.1} s", refreshed.len(), started.elapsed().as_secs_f64());
+            (gone, refreshed, slow)
+        };
         let mut failed = Vec::new();
         let total = slow.len();
         for (n, entry) in slow.into_iter().enumerate() {
@@ -806,32 +864,65 @@ impl App {
                     t.title = format!("Signing again: {} of {total}", n + 1);
                 }
             }
-            let name = entry.name.clone();
-            match self.resign(&session, &apple, entry).await {
-                Ok(_) => done += 1,
+            let (name, id) = (entry.name.clone(), entry.bundle_id.clone());
+            match self.resign(&mut job, entry).await {
+                Ok(_) => refreshed.push(id),
                 Err(err) => {
                     logf!("refresh: {name}: {err}");
                     failed.push(format!("{name}: {err}"));
                 }
             }
         }
-        let refreshed = match (done, single) {
+        let lc = self.finish(&job).await;
+        let until = install::installed().iter().filter(|e| refreshed.contains(&e.bundle_id))
+            .map(|e| e.expires).filter(|e| *e > 0).min();
+        let more = until.map(|u| match (u.saturating_sub(unix_now()) + 43_200) / 86_400 {
+            0 => " for less than a day".to_string(),
+            1 => " for 1 more day".to_string(),
+            days => format!(" for {days} more days"),
+        }).unwrap_or_default();
+        let mut text = match (refreshed.len(), single) {
             (0, _) => String::new(),
-            (_, Some(name)) => format!("{name} is refreshed for 7 more days."),
-            (n, None) => format!("{n} app{} refreshed for 7 more days.", if n == 1 { "" } else { "s" }),
+            (_, Some(name)) => format!("{name} is refreshed{more}."),
+            (n, None) => format!("{n} app{} refreshed{more}.", if n == 1 { "" } else { "s" }),
         };
-        if failed.is_empty() {
-            Ok(refreshed)
-        } else {
-            Err(format!("{refreshed}{}Not refreshed:\n{}", if refreshed.is_empty() { "" } else { "\n" }, failed.join("\n")))
+        if !gone.is_empty() {
+            let names: Vec<&str> = gone.iter().map(|g| g.name.as_str()).collect();
+            text = format!("{text}{}{} {} no longer on this device: BariStore forgot {}.", if text.is_empty() { "" } else { " " },
+                           names.join(", "), if names.len() == 1 { "is" } else { "are" },
+                           if names.len() == 1 { "it" } else { "them" });
         }
+        text.push_str(&lc);
+        if failed.is_empty() {
+            Ok(text.trim_start().to_string())
+        } else {
+            Err(format!("{text}{}Not refreshed:\n{}", if text.is_empty() { "" } else { "\n" }, failed.join("\n")))
+        }
+    }
+
+    /// Records of apps the device no longer has (deleted on its Home Screen):
+    /// BariStore forgets them, as AltStore does, so no refresh installs them
+    /// again or registers their App IDs again. The ones forgotten.
+    fn forget_missing(&self, on_device: &[String]) -> Vec<Installed> {
+        // A device always lists apps (Minis, for one): an empty list is no answer.
+        if on_device.is_empty() {
+            return Vec::new();
+        }
+        let (kept, gone): (Vec<Installed>, Vec<Installed>) = install::installed().into_iter()
+            .partition(|e| on_device.contains(&e.bundle_id));
+        if !gone.is_empty() {
+            for g in &gone {
+                logf!("apps: {} ({}) is no longer on the device; BariStore forgets it", g.name, g.bundle_id);
+            }
+            install::save_installed(&kept);
+            self.inner.lock().unwrap().app_ids = Json::Null;
+        }
+        gone
     }
 
     /// The full refresh: signed and installed again from the cached IPA
     /// (downloaded again when the cache was cleared), with its options.
-    async fn resign(&self, session: &Session, apple: &(gsa::GrandSlam, gsa::Account), mut entry: Installed)
-        -> Result<String, String>
-    {
+    async fn resign(&self, job: &mut Job, mut entry: Installed) -> Result<String, String> {
         if !std::path::Path::new(&entry.ipa_path).is_file() {
             // Cleared from the cache: download it again from where it came from.
             if entry.source_url.is_empty() {
@@ -842,16 +933,12 @@ impl App {
                 date: String::new(), url: entry.source_url.clone(), size: 0, sha256: String::new(), min_os: String::new(),
                 notes: String::new(), warning: String::new(),
             };
-            let app = self.clone();
-            let path = store::download(&v, &move |done, total| {
-                let pct = if total > 0 { (done * 100 / total) as u32 } else { 0 };
-                app.progress(format!("Downloading {} of {} MB", done / 1_000_000, total.max(done) / 1_000_000), pct);
-            }).await?;
+            let path = store::download(&v, &self.downloading()).await?;
             entry.ipa_path = path.to_string_lossy().into();
         }
         let bytes = tokio::task::block_in_place(|| std::fs::read(&entry.ipa_path)).map_err(|e| e.to_string())?;
         let opts = entry.signing_options();
-        self.sign_and_install(session, apple, bytes, opts, install::Reuse::default(), entry).await
+        self.sign_and_install(job, bytes, opts, install::Reuse::default(), entry).await
     }
 
     /// The catalog's offer for an installed app: the same app from the same
@@ -881,15 +968,16 @@ impl App {
     /// Installs the newer version over the app, keeping its App IDs and
     /// options.
     pub async fn update_app(&self, bundle_id: &str) -> Result<String, String> {
+        let mut job = self.job().await?;
+        let done = self.update_one(&mut job, bundle_id).await?;
+        Ok(done + &self.finish(&job).await)
+    }
+
+    async fn update_one(&self, job: &mut Job, bundle_id: &str) -> Result<String, String> {
         let mut entry = install::installed().into_iter().find(|i| i.bundle_id == bundle_id)
             .ok_or("BariStore did not install this app.")?;
         let (_, _, v) = self.offer(&entry).ok_or("Its source no longer offers it.")?;
-        let (session, apple) = self.ready_to_install().await?;
-        let app = self.clone();
-        let path = store::download(&v, &move |done, total| {
-            let pct = if total > 0 { (done * 100 / total) as u32 } else { 0 };
-            app.progress(format!("Downloading {} of {} MB", done / 1_000_000, total.max(done) / 1_000_000), pct);
-        }).await?;
+        let path = store::download(&v, &self.downloading()).await?;
         let old = std::mem::replace(&mut entry.ipa_path, path.to_string_lossy().into());
         if old != entry.ipa_path && !install::installed().iter().any(|o| o.bundle_id != entry.bundle_id && o.ipa_path == old) {
             let _ = std::fs::remove_file(&old);
@@ -899,25 +987,32 @@ impl App {
         entry.source_url = v.url.clone();
         let bytes = tokio::task::block_in_place(|| std::fs::read(&entry.ipa_path)).map_err(|e| e.to_string())?;
         let opts = entry.signing_options();
-        self.sign_and_install(&session, &apple, bytes, opts, install::Reuse::default(), entry).await?;
+        self.sign_and_install(job, bytes, opts, install::Reuse::default(), entry).await?;
         Ok(format!("{name} is updated to {}.", v.version))
     }
 
+    /// Every update in one task: the device, the Apple ID and what Apple
+    /// says for all of them are asked for once.
     pub async fn update_all(&self) -> Result<String, String> {
         let list = self.updates();
+        if list.is_empty() {
+            return Ok("No updates found.".into());
+        }
+        let mut job = self.job().await?;
         let mut failed = Vec::new();
         for (n, u) in list.iter().enumerate() {
             let (id, name) = (u["bundle_id"].as_str().unwrap_or(""), u["name"].as_str().unwrap_or(""));
             if let Some(t) = self.inner.lock().unwrap().task.as_mut() {
                 t.title = format!("Updating {} of {}", n + 1, list.len());
             }
-            if let Err(err) = self.update_app(id).await {
+            if let Err(err) = self.update_one(&mut job, id).await {
                 logf!("update: {name}: {err}");
                 failed.push(format!("{name}: {err}"));
             }
         }
+        let lc = self.finish(&job).await;
         if failed.is_empty() {
-            Ok(format!("{} app{} updated.", list.len(), if list.len() == 1 { "" } else { "s" }))
+            Ok(format!("{} app{} updated.{lc}", list.len(), if list.len() == 1 { "" } else { "s" }))
         } else {
             Err(failed.join("\n"))
         }
@@ -957,8 +1052,9 @@ impl App {
         if !std::path::Path::new(&entry.ipa_path).is_file() {
             return Err("BariStore no longer has this app's IPA. The change is kept for its next update.".into());
         }
-        let (session, apple) = self.ready_to_install().await?;
-        self.resign(&session, &apple, entry).await
+        let mut job = self.job().await?;
+        let done = self.resign(&mut job, entry).await?;
+        Ok(done + &self.finish(&job).await)
     }
 
     /// Install to LiveContainer, for an app from a source. An app from one
@@ -1003,7 +1099,7 @@ impl App {
             .find(|id| id.starts_with("com.kdt.livecontainer"))
             .or_else(|| install::installed().into_iter()
                 .find(|i| i.kind == install::LIVECONTAINER || i.kind == install::LIVECONTAINER_SIDESTORE).map(|i| i.bundle_id))
-            .ok_or("LiveContainer is not on this iPhone")?;
+            .ok_or("LiveContainer is not on this device")?;
         let mut afc = services::app_container(&s, &id, false).await?;
         let prefs = afc.read_file(&format!("/Library/Preferences/{id}.plist"), 4 << 20).await.unwrap_or_default();
         if prefs.is_empty() {
@@ -1063,10 +1159,10 @@ impl App {
     /// a free team has left.
     pub async fn load_app_ids(&self) -> Result<(), String> {
         let apple = self.apple().await?;
-        let team = self.team()?;
+        let team = self.team_checked(&apple).await?;
         let ids = portal::Portal { gs: &apple.0, account: &apple.1 }.app_ids(&team.id).await.map_err(|e| e.to_string())?;
-        // Which app holds each App ID: the apps on the iPhone (any tool's),
-        // else BariStore's own list when the iPhone cannot be reached.
+        // Which app holds each App ID: the apps on the device (any tool's),
+        // else BariStore's own list when the device cannot be reached.
         let mut apps: Vec<(String, String)> = install::installed().into_iter().map(|i| (i.bundle_id, i.name)).collect();
         if let Ok(s) = self.device().await {
             if let Ok(list) = services::installed_apps(&s).await {
@@ -1074,12 +1170,14 @@ impl App {
                 apps = on_device.iter().filter(|d| d["name"] != "")
                     .map(|d| (d["bundle_id"].as_str().unwrap_or("").to_string(), d["name"].as_str().unwrap_or("").to_string()))
                     .collect();
-                self.inner.lock().unwrap().device_apps = on_device;
+                self.device_apps_seen(on_device);
             }
         }
         let list = label_app_ids(&ids, &apps, &install::installed());
+        // A paid team has no limit to show.
         self.inner.lock().unwrap().app_ids = json!({
             "list": list, "left": portal::FREE_APP_IDS.saturating_sub(ids.len()), "max": portal::FREE_APP_IDS,
+            "free": team.free,
         });
         Ok(())
     }
@@ -1102,40 +1200,51 @@ impl App {
         Ok("Revoked. Apps signed with it stop opening until they are installed again.".into())
     }
 
-    /// BariStore's signing certificate as a .p12 with a new password (for
-    /// LiveContainer's own import, or any other tool).
-    async fn signing_p12(&self) -> Result<(Vec<u8>, String), String> {
+    /// The certificate BariStore signs with (made when there is none).
+    async fn signing_cert(&self) -> Result<portal::DevCert, String> {
         let apple = self.apple().await?;
         let team = self.team()?;
-        let app = self.clone();
-        let ask: Box<install::Asker> = Box::new(move |title, message, options| {
-            let app = app.clone();
-            Box::pin(async move {
-                let refs: Vec<&str> = options.iter().map(String::as_str).collect();
-                app.ask("choice", &title, &message, &refs).await
-            })
-        });
         self.step("Loading the signing certificate");
-        let cert = install::certificate(&portal::Portal { gs: &apple.0, account: &apple.1 }, &team.id, ask.as_ref()).await?;
-        let password = install::p12_password();
-        let p12 = crate::sign::p12::pkcs12(&cert.der, &cert.key, &password, "BariStore")?;
-        Ok((p12, password))
+        let ask = self.asker();
+        install::certificate(&portal::Portal { gs: &apple.0, account: &apple.1 }, &team.id, ask.as_ref()).await
     }
 
-    /// Options › Apple ID › Export certificate: the page shares the file.
+    /// Options › Apple ID › Export certificate: the page shares the file,
+    /// a .p12 with a new password (for BariStore on another device,
+    /// LiveContainer's own import, or any other tool).
     pub async fn export_certificate(&self) -> Result<Json, String> {
         use base64::Engine;
-        let (p12, password) = self.signing_p12().await?;
+        let cert = self.signing_cert().await?;
+        let password = install::p12_password();
+        let p12 = crate::sign::p12::pkcs12(&cert.der, &cert.key, &password, "BariStore")?;
         Ok(json!({"name": "BariStore-Certificate.p12", "type": "application/x-pkcs12",
                   "base64": base64::engine::general_purpose::STANDARD.encode(p12), "password": password}))
+    }
+
+    /// Options › Apple ID › Certificates › Import: a .p12 exported where
+    /// BariStore signs with it (another device with this Apple ID). Both
+    /// sign with the same certificate then, and neither revokes the other's.
+    pub async fn import_certificate(&self, p12_base64: &str, password: &str) -> Result<String, String> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(p12_base64.trim())
+            .map_err(|_| "That file is not a .p12.".to_string())?;
+        let (cert, key) = crate::sign::p12::open(&bytes, password)?;
+        let apple = self.apple().await?;
+        let team = self.team()?;
+        self.step("Checking the certificate with Apple");
+        let serial = portal::Portal { gs: &apple.0, account: &apple.1 }.adopt(&team.id, &cert, &key).await
+            .map_err(|e| e.to_string())?;
+        logf!("certificates: imported {serial}; BariStore signs with it now");
+        Ok("BariStore signs with this certificate now, as the device it came from does, so neither revokes the \
+            other's. Apps installed here with another certificate are signed again at their next refresh.".into())
     }
 
     /// LiveContainer stores the certificate (JIT-less mode) from its
     /// livecontainer://certificate URL, the way SideStore hands it over.
     pub async fn lc_certificate(&self) -> Result<String, String> {
-        let (p12, password) = self.signing_p12().await?;
+        let cert = self.signing_cert().await?;
         self.step("Opening LiveContainer");
-        match minis::open_url(&install::livecontainer_certificate_url(&p12, &password)).await {
+        match give_certificate(&cert).await {
             Ok(true) => Ok("Sent to LiveContainer: its Settings tab shows the certificate. If iOS said Untrusted \
                             Developer, trust your Apple ID in Settings › General › VPN & Device Management and try \
                             again.".into()),
@@ -1151,8 +1260,8 @@ impl App {
         let name = install::installed().into_iter().find(|i| i.bundle_id == bundle_id).map(|i| i.name)
             .ok_or("BariStore did not install this app.")?;
         let s = self.device().await?;
-        if services::developer_mode(&s).await? == Some(false) {
-            return Err("Developer Mode is off. Turn it on in Settings › Privacy & Security, then try again.".into());
+        if self.inner.lock().unwrap().setup.devmode == Some(false) {
+            return Err(DEVMODE_OFF.into());
         }
         let app = self.clone();
         let progress = move |text: String| app.step(text);
@@ -1199,8 +1308,19 @@ impl App {
     pub async fn load_device_apps(&self) -> Result<(), String> {
         let s = self.device().await?;
         let list = device_list(&services::installed_apps(&s).await?);
-        self.inner.lock().unwrap().device_apps = list;
+        self.device_apps_seen(list);
         Ok(())
+    }
+
+    /// The device's apps as the page gets them; BariStore's records of apps
+    /// it no longer has are forgotten (not while a task runs: an app being
+    /// installed is not there yet).
+    fn device_apps_seen(&self, list: Vec<Json>) {
+        if !self.busy() {
+            let ids: Vec<String> = list.iter().filter_map(|d| d["bundle_id"].as_str().map(str::to_string)).collect();
+            self.forget_missing(&ids);
+        }
+        self.inner.lock().unwrap().device_apps = list;
     }
 
     pub async fn place_pairing(&self, bundle_id: &str) -> Result<String, String> {
@@ -1210,7 +1330,7 @@ impl App {
             return Err("This app does not read a pairing file.".into());
         }
         let s = self.device().await?;
-        let record = flow::load_record().ok_or("This iPhone is not paired yet.")?;
+        let record = flow::load_record().ok_or("This device is not paired yet.")?;
         if install::place_pairing_file(&s, bundle_id, &kind, &record).await? {
             Ok("The app has the pairing file now.".into())
         } else {
@@ -1222,7 +1342,7 @@ impl App {
     /// Save to Files, AirDrop, another app).
     pub fn export_pairing(&self) -> Result<Json, String> {
         use base64::Engine;
-        let record = flow::load_record().ok_or("This iPhone is not paired yet.")?;
+        let record = flow::load_record().ok_or("This device is not paired yet.")?;
         Ok(json!({"name": "BariStore-Pairing.plist", "type": "application/x-plist",
                   "base64": base64::engine::general_purpose::STANDARD.encode(record.to_remote_only_xml())}))
     }
@@ -1235,7 +1355,7 @@ impl App {
         i.setup.email.clear();
     }
 
-    /// Forgets everything except installed apps on the iPhone itself.
+    /// Forgets everything except installed apps on the device itself.
     pub async fn reset(&self) {
         *self.apple.lock().await = None;
         *self.session.lock().await = None;
@@ -1260,38 +1380,44 @@ impl App {
         i.catalog = store::cached_catalog();
     }
 
-    /// Options › Clear cache: icons, the catalog copy and every IPA, added
-    /// ones too (owner, 1.1.0: the IPA just installed stayed and its size
-    /// with it). An app signed again later (a new certificate) is downloaded
-    /// again; an added one must be added again. While a task runs, the IPAs
-    /// of the last hour stay (it may be using one).
+    /// Options › Clear cache: pictures, the catalog copy and the IPAs no
+    /// installed app is signed from (other versions, broken downloads). The
+    /// stored IPAs stay: they have a button of their own (owner, 1.1.1).
     pub fn clear_cache(&self) -> String {
-        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        let busy = self.busy();
         let mut freed = dir_size(&state::path("icons"));
         let _ = std::fs::remove_dir_all(state::path("icons"));
         if let Ok(meta) = std::fs::metadata(state::path("catalog.json")) {
             freed += meta.len();
         }
         let _ = std::fs::remove_file(state::path("catalog.json"));
-        if let Ok(dir) = std::fs::read_dir(state::path("ipas")) {
-            for e in dir.flatten() {
-                let Ok(meta) = e.metadata() else { continue };
-                if busy && meta.modified().map_or(true, |m| m > hour_ago) {
-                    continue;
-                }
-                if std::fs::remove_file(e.path()).is_ok() {
-                    freed += meta.len();
-                }
-            }
-        }
+        let stored = stored_ipas();
+        freed += remove_ipas(|p| !stored.iter().any(|s| s == p), self.busy());
         logf!("cache: cleared {} MB", freed / 1_000_000);
         format!("Freed {} MB.", (freed + 500_000) / 1_000_000)
     }
 
-    pub fn cache_size(&self) -> u64 {
-        dir_size(&state::path("icons")) + dir_size(&state::path("ipas"))
-            + std::fs::metadata(state::path("catalog.json")).map(|m| m.len()).unwrap_or(0)
+    /// Options › Clear stored IPAs: the IPA each installed app was signed
+    /// from, added ones too. The apps stay; Increased Memory Limit or a new
+    /// icon then waits for their next update, a new certificate downloads a
+    /// store app again, and an added one must be added again.
+    pub fn clear_ipas(&self) -> String {
+        let stored = stored_ipas();
+        let freed = remove_ipas(|p| stored.iter().any(|s| s == p), self.busy());
+        logf!("cache: stored IPAs cleared, {} MB", freed / 1_000_000);
+        format!("Freed {} MB.", (freed + 500_000) / 1_000_000)
+    }
+
+    /// Options' sizes: the cache (pictures, catalog copy, IPAs no app needs)
+    /// and the stored IPAs, in bytes.
+    pub fn cache_sizes(&self) -> (u64, u64) {
+        let stored = stored_ipas();
+        let (mut cache, mut ipas) = (dir_size(&state::path("icons")), 0);
+        cache += std::fs::metadata(state::path("catalog.json")).map(|m| m.len()).unwrap_or(0);
+        for e in std::fs::read_dir(state::path("ipas")).into_iter().flatten().flatten() {
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if stored.contains(&e.path()) { ipas += size } else { cache += size }
+        }
+        (cache, ipas)
     }
 
     /// Options › Update BariStore: the newest build, then a restart into it.
@@ -1311,7 +1437,7 @@ impl App {
     }
 }
 
-/// The iPhone's apps as the page gets them (whoever installed them: the
+/// The device's apps as the page gets them (whoever installed them: the
 /// page finds LiveContainer among them).
 fn device_list(apps: &[plist::Dictionary]) -> Vec<Json> {
     apps.iter().map(|d| {
@@ -1319,6 +1445,25 @@ fn device_list(apps: &[plist::Dictionary]) -> Vec<Json> {
         json!({"bundle_id": t("CFBundleIdentifier"), "name": if t("CFBundleDisplayName").is_empty() { t("CFBundleName") } else { t("CFBundleDisplayName") },
                "version": t("CFBundleShortVersionString"), "signer": t("SignerIdentity")})
     }).collect()
+}
+
+/// LiveContainer's certificate import with the certificate BariStore signs
+/// with (a .p12 with a new password); whether iOS opened LiveContainer. The
+/// records of LiveContainer signed with it remember that it has it.
+async fn give_certificate(cert: &portal::DevCert) -> Result<bool, String> {
+    let password = install::p12_password();
+    let p12 = crate::sign::p12::pkcs12(&cert.der, &cert.key, &password, "BariStore")?;
+    let opened = minis::open_url(&install::livecontainer_certificate_url(&p12, &password)).await
+        .map_err(|e| e.to_string())?;
+    if opened {
+        let mut list = install::installed();
+        for e in list.iter_mut().filter(|e| install::takes_certificate(&e.kind) && e.cert_serial == cert.serial) {
+            e.lc_cert = cert.serial.clone();
+        }
+        install::save_installed(&list);
+        logf!("livecontainer: given certificate {}", cert.serial);
+    }
+    Ok(opened)
 }
 
 /// Opens a livecontainer:// URL (through iOS: Minis's browser cannot).
@@ -1354,7 +1499,7 @@ fn replacing(entry: &mut Installed, reuse: install::Reuse) -> install::Reuse {
 /// its extensions' App IDs, made under that App ID, are named as the app,
 /// "created under" the App ID. A free App ID under another says which.
 fn label_app_ids(ids: &[portal::AppId], apps: &[(String, String)], installed: &[Installed]) -> Vec<Json> {
-    // The app on the iPhone an identifier belongs to: itself, or the app it
+    // The app on the device an identifier belongs to: itself, or the app it
     // is an extension of (the longest match).
     let holder = |id: &str| apps.iter().filter(|(b, _)| id == b || id.starts_with(&format!("{b}.")))
         .max_by_key(|(b, _)| b.len());
@@ -1392,6 +1537,34 @@ fn label_app_ids(ids: &[portal::AppId], apps: &[(String, String)], installed: &[
     }).collect()
 }
 
+/// One install, update or refresh task: the device, the Apple ID, its team,
+/// and what Apple said once for all of the task's apps.
+struct Job {
+    session: Arc<Session>,
+    apple: Arc<(gsa::GrandSlam, gsa::Account)>,
+    team: portal::Team,
+    udid: String,
+    device_name: String,
+    shared: Option<install::Shared>,
+    /// The task installed the first app: iOS opens BariStore's apps only
+    /// once the user trusts the Apple ID.
+    first: bool,
+    /// The apps the task signed and installed.
+    signed: Vec<String>,
+}
+
+const DEVMODE_OFF: &str = "Developer Mode is off. Turn it on in Settings › Privacy & Security, then try again.";
+
+/// The team file: id, name, and whether it is free ("free"/"paid").
+fn save_team(team: &portal::Team) {
+    let _ = std::fs::write(state::path("team"),
+                           format!("{}\n{}\n{}", team.id, team.name, if team.free { "free" } else { "paid" }));
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
 /// Changes when the server restarts: the page reloads itself then.
 pub fn boot_id() -> &'static str {
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -1427,6 +1600,28 @@ fn prune_files() {
     if freed > 0 {
         logf!("cache: {} MB of IPAs no app needs removed", freed / 1_000_000);
     }
+}
+
+/// The IPAs installed apps are signed from.
+fn stored_ipas() -> Vec<std::path::PathBuf> {
+    install::installed().into_iter().map(|i| i.ipa_path.into()).collect()
+}
+
+/// Deletes the files in ipas/ that `which` picks; while a task runs, those
+/// of the last hour stay (it may be using one). The bytes freed.
+fn remove_ipas(which: impl Fn(&std::path::Path) -> bool, busy: bool) -> u64 {
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let mut freed = 0;
+    for e in std::fs::read_dir(state::path("ipas")).into_iter().flatten().flatten() {
+        let Ok(meta) = e.metadata() else { continue };
+        if !which(&e.path()) || (busy && meta.modified().map_or(true, |m| m > hour_ago)) {
+            continue;
+        }
+        if std::fs::remove_file(e.path()).is_ok() {
+            freed += meta.len();
+        }
+    }
+    freed
 }
 
 fn dir_size(dir: &std::path::Path) -> u64 {

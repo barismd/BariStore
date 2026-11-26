@@ -425,9 +425,9 @@ impl RemoteXpc {
             }
             // A finished file-transfer stream is reset by the device: normal.
             RST_STREAM if stream >= 5 => {}
-            RST_STREAM => return Err(format!("the iPhone reset XPC stream {stream}")),
+            RST_STREAM => return Err(format!("the device reset XPC stream {stream}")),
             GOAWAY => return Err(format!(
-                "the iPhone closed RemoteXPC: {}", String::from_utf8_lossy(payload.get(8..).unwrap_or(&[])))),
+                "the device closed RemoteXPC: {}", String::from_utf8_lossy(payload.get(8..).unwrap_or(&[])))),
             _ => {}
         }
         Ok(())

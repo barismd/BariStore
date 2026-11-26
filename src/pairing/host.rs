@@ -1,5 +1,5 @@
 //! The pairable host: the side Settings › Privacy & Security › Developer Mode
-//! › "Pair with …" dials. The iPhone drives the conversation; we answer the
+//! › "Pair with …" dials. The device drives the conversation; we answer the
 //! handshake and play the accessory/server role of pair-setup M1–M6.
 //!
 //! Wire: each frame is b"RPPairing" + u16 BE length + JSON envelope
@@ -36,8 +36,8 @@ pub enum PairError {
 impl std::fmt::Display for PairError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PairError::WrongCode => write!(f, "the code entered on the iPhone did not match"),
-            PairError::Rejected(why) => write!(f, "the iPhone cancelled the pairing ({why})"),
+            PairError::WrongCode => write!(f, "the code entered on the device did not match"),
+            PairError::Rejected(why) => write!(f, "the device cancelled the pairing ({why})"),
             PairError::Protocol(why) => write!(f, "unexpected pairing message: {why}"),
             PairError::Io(e) => write!(f, "the connection broke: {e}"),
         }
@@ -137,7 +137,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> PairableHost<'a, S> {
             handshake.get("wireProtocolVersion").unwrap_or(&Json::Null),
             handshake.get("hostOptions").unwrap_or(&Json::Null)));
         if handshake.pointer("/hostOptions/attemptPairVerify") == Some(&Json::Bool(true)) {
-            return Err(proto("the iPhone asked to pair-verify an existing pairing"));
+            return Err(proto("the device asked to pair-verify an existing pairing"));
         }
         let response = json!({
             "response": {

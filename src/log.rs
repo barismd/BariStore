@@ -42,14 +42,16 @@ pub fn line(text: impl AsRef<str>) {
     if std::env::var_os("BARISTORE_ECHO").is_some() {
         eprintln!("{entry}");
     }
+    // One writer at a time, one write per line: writeln! made two writes,
+    // and two threads' lines ran into each other ("38%05:54:26.601Z …").
+    let mut recent = RECENT.lock().unwrap_or_else(|e| e.into_inner());
     let path = crate::state::path("baristore.log");
     if WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1000 == 0 {
         trim(&path);
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{entry}");
+        let _ = file.write_all(format!("{entry}\n").as_bytes());
     }
-    let mut recent = RECENT.lock().unwrap_or_else(|e| e.into_inner());
     recent.push(entry);
     if recent.len() > KEEP {
         let extra = recent.len() - KEEP;

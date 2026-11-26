@@ -4,7 +4,10 @@
 
 An app store for iPhone/iPad that runs in **Open Minis** (1.16+), one device,
 no computer. One command: `baristore` opens the store page (minis-open sheet).
-iOS/iPadOS 27+ only. Free Apple ID accounts only.
+iOS/iPadOS 27+ only. Made for free Apple IDs; a paid team is told apart
+(listTeams memberships, as AltSign reads them; `team` file's third line
+"free"/"paid") and the free limits (10 App IDs, 3 apps, 7 days) are neither
+applied nor shown for it (owner, 1.1.1).
 
 ## Decisions (owner)
 
@@ -32,13 +35,13 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   refresh, delete, per-app options with Beta updates: Off or the source's
   tracks; memory only in the app's About; App IDs: a reused App ID shows its
   own name "used by" the app, its extensions' IDs the app's name "created
-  under the X App ID"), Options (Apple ID with Certificates: list, revoke,
+  under the X App ID"), Options (Apple ID with Certificates: list, revoke, import,
   export .p12, and Anisette server: Automatic, or Select Anisette Server:
   one of BariStore's servers or one the user adds (plain HTTP only after a
   "not secure" warning), also behind a small gear on setup's Apple ID step;
   pairing export through the share
-  sheet; info, theme, reset, install defaults: Increased Memory
-  Limit, remove extensions). Install sheet: "Extensions too" (reuse free App
+  sheet; info, theme, Clear cache and Clear stored IPAs, reset, install
+  defaults: Increased Memory Limit, remove extensions). Install sheet: "Extensions too" (reuse free App
   IDs under a reused one) is on offer only when the chosen App ID has as many
   free App IDs under it as the app has extensions (counted from the IPA's
   zip directory). Extensions cannot take another app's App ID: iOS requires
@@ -112,9 +115,11 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
 - Cache (owner, 1.0.2: it piled up): after every task, at start and on a
   catalog refresh with no task running, ipas/ keeps only IPAs installed
   apps need and files from the last hour (an open install sheet, a retry);
-  Options › Clear cache deletes every IPA, added ones too (owner, 1.1.0: the
-  one just installed stayed with its size), those of the last hour only
-  when no task runs;
+  Options has two buttons, each with its size and a warning (owner, 1.1.1):
+  Clear cache (pictures, the catalog copy, IPAs no installed app is signed
+  from) and Clear stored IPAs (the ones installed apps are signed from,
+  added ones too; owner, 1.1.0: the one just installed stayed with its
+  size); files of the last hour stay while a task runs;
   pictures of apps no source lists go after each catalog refresh, and the
   oldest beyond 80 MB; baristore.log and server.out are cut to their last
   512 KB past 2 MB (they only ever grew).
@@ -123,7 +128,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
 - Versions: 1.0.0 is the first stable release (history squashed). CI builds
   every push to `main` that touches the code into `v<version>`: the latest
   release when stable (install.sh and `baristore update` download it), a
-  prerelease for x.y.z-alpha.N. No nightly (owner, 1.0.0).
+  prerelease for x.y.z-alpha.N. No nightly (owner, 1.0.0). A version built
+  again replaces its release and tag (owner, 1.1.1 was published again:
+  "the old one must not stay").
 - Website: `docs/` on GitHub Pages (main, /docs):
   https://barismd.github.io/BariStore/, with `docs/install.sh` (the one-line
   install) and the screenshots README shows.
@@ -132,8 +139,9 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   tunnel, sign-in probe) in the page.
 - Code, comments, commits, README in English. The owner talks Turkish.
 - README and website (owner, 1.0.1): for iPhone and iPad; say what BariStore
-  does, never "the way SideStore/StikDebug… does it". The page says "iPad"
-  on an iPad (`DEVICE`, BariStore's own messages through `dev()`).
+  does, never "the way SideStore/StikDebug… does it". The page and
+  BariStore's messages say "device", never "iPhone" (owner, 1.1.1: an iPad
+  read "iPhone" everywhere; "device is enough").
 - Device tests come in **batches** the owner runs; keep their effort low.
 
 ## Facts we rely on (and where they come from)
@@ -148,8 +156,7 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   code is made and notified at M1 (owner: an earlier notification is gone by then).
 - Developer Mode may be missing from Settings on a phone that never had it:
   offering a pairing (the pairable-host advert) makes iOS show it (Apple's
-  docs, and the owner's a-Shell build revealed it this way). After pairing,
-  AMFI action 0/1 shows or turns it on.
+  docs, and the owner's a-Shell build revealed it this way).
 - Tunnel TCP (as jktcp, idevice's device-proven stack): MSS = min(MTU from the
   CDTunnel handshake, 8192) - 60, window scale option sent (shift 0) and the
   peer's honoured, at most 1 MiB in flight; AFC writes 1 MiB per request.
@@ -215,7 +222,20 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   every picture through the queue again).
 - Wi-Fi cannot be read in Minis. A connect to 10.7.0.1 that times out means no
   route (mobile data or no VPN): say so, never knock 16 000 ports then
-  (siboot's preflight); a refused port does mean "look on other ports".
+  (siboot's preflight); a refused port does mean "look on other ports". The
+  probe takes three tries on new sockets (2.5 s each): back in the
+  foreground the first one went nowhere and a retry seconds later connected
+  (owner's log, 1.1.0). Untested on device.
+- Sources (owner, 1.1.0: "could not reach the source" within a second of
+  opening, a restart fixed some): the error shown was the previous run's,
+  saved in sources.json; errors are no longer read back, the page hides them
+  while a fetch runs, a GET that got no answer (or a 5xx) is tried again
+  after 1 s and 3 s (sources, the picks' GitHub API, icons), and the log
+  names the cause (DNS, refused, reset, TLS), not only reqwest's "error
+  sending request". Untested on device.
+- Log lines are one write each under the log's lock (writeln! made two and
+  two threads' lines ran into each other); "Reading the app" and "Signing n
+  of m" are progress, not log lines.
 - The page's origin is stable per run, but nothing it must remember lives in
   localStorage: settings.json holds theme and setup_done.
   WKWebView in Minis shows no confirm()/alert(): the page uses its own sheets.
@@ -248,18 +268,31 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   device 2026-11-21). The session data (spd) is keyed on S, falling back to
   H(S). Pair-setup keeps unpadded g (device-proven). Known-answer test from
   the old Python sign-in in `src/srp.rs`.
-- Refresh, as AltStore and SideStore do it: an app still on the iPhone,
-  signed with the certificate BariStore still signs with (`cert_serial` in
+- Refresh, as AltStore and SideStore do it: an app on the device, signed
+  with the certificate BariStore still signs with (`cert_serial` in
   installed.json; records older than it: the certificate's notBefore is
   before the install), gets fresh profiles for its App IDs through misagent
   (`com.apple.misagent.shim.remote`, Install/Provisioning, idevice) and is
-  neither re-signed nor uploaded. Refresh all does every app in one pass:
-  certificate, device, App IDs and the iPhone's apps asked for at once, all
-  profiles at the same time; only the rest (a new certificate, a missing App
-  ID) is signed again, one after another. Developer-services requests reuse
-  one set of anisette headers for 30 s (AltStore uses one per operation).
-  Owner, alpha.12: refresh still re-signed (records without `cert_serial`);
-  the one-pass refresh is untested on device.
+  neither re-signed nor uploaded. A task asks Apple once (`install::Shared`:
+  certificate, device registered, App IDs, the device's apps, at the same
+  time); refresh, Update all and the slow re-signs reuse it. Only the rest
+  (a new certificate, an expired App ID) is signed again, one after another.
+  Developer-services requests reuse one set of anisette headers for 30 s
+  (AltStore uses one per operation). The one-pass refresh is untested on
+  device (owner's 1.1.0 log: a new certificate, both apps re-signed).
+- App IDs (owner, 1.1.1: "renew them only when needed"), as AltStore and
+  SideStore do (FetchProvisioningProfilesOperation, read 2026-11-26): an App
+  ID is the app's own identifier + "." + team (extensions under it), kept
+  per installed app; every install and refresh uses the team's App ID when
+  it exists and registers one only when it is missing (expired: App IDs end
+  7 days after they were made, a refresh renews profiles, never App IDs),
+  only for apps on the device. Apps deleted on the device are forgotten
+  (AltStore deletes those records at launch): a refresh, the App IDs list and
+  the page's connection check drop records the device's app list lacks (not
+  while a task runs, never on an empty list), so no refresh installs a
+  deleted app again (1.1.0 did: it signed every record it could not refresh).
+  Another device with the same Apple ID shares the App IDs: "Not on this
+  device" in the list may be in use there.
 - Store app versions: an AltSource's `versions[0]` (channel "") and the beta
   tracks of SideStore's format (`releaseChannels`: track + releases, newest
   first; "stable" is the plain version). Picks: "stable"/"nightly". An
@@ -277,6 +310,12 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   shows from the tap ("cancel" closes it), then MB sent, time left and
   "Reading the app…", with Cancel. The server reads the body in 4 MiB pieces
   and writes each with `block_in_place`.
+- Install order (owner, 1.1.1: optimise): the IPA is read on a thread of its
+  own while `install::Shared` is asked for; the app group is looked up (made)
+  once; the app's and its extensions' App Groups, Increased Memory Limit and
+  profiles are asked for at the same time (AltStore does extensions side by
+  side); a cached tunnel's liveness check also gives Developer Mode's state.
+  Untested on device.
 - Signing speed (owner: a 140 MB app took very long): the IPA is unpacked
   and hashed on up to four threads, page hashes are computed on several
   threads, and the final check compares only the Info.plist/CodeResources
@@ -305,7 +344,7 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   JIT."
 - Free teams: 10 App IDs at a time (SideStore counts the same); listAppIds
   gives each one's expiry. The install sheet picks "new" or an App ID whose app
-  is not on the iPhone (installation_proxy Browse); when the IDs run out
+  is not on the device (installation_proxy Browse); when the IDs run out
   BariStore asks which one to reuse. Extensions only take ones under the
   app's identifier. The profile is checked for Increased Memory Limit.
   Installed.ids keeps the identifiers so refreshes keep them.
@@ -323,9 +362,35 @@ iOS/iPadOS 27+ only. Free Apple ID accounts only.
   group's defaults, which house_arrest cannot reach. Its ZSign opens the
   .p12 with OpenSSL 3 PKCS12_parse (our PBES2/AES-256 + HMAC-SHA256 p12 is
   fine; checked with OpenSSL 3.0 here). Manual import asks for a .p12 and its
-  password: Options › Apple ID › Certificates › Export gives both.
-- Development certificates: when submitDevelopmentCSR answers 7460 and none
-  is BariStore's, the install asks which one to revoke (no more dead end).
+  password: Options › Apple ID › Certificates › Export gives both. A task
+  that signed LiveContainer with a certificate it was not given yet
+  (`lc_cert` in installed.json) sends it at its end (owner, 1.1.1: after a
+  new certificate LiveContainer kept the revoked one); on the first app (the
+  Apple ID not trusted yet) a button offers it instead. The other kinds take
+  the certificate inside their signed bundle (ALTCertificate.p12), StikDebug
+  only the pairing file. Untested on device.
+- Development certificates: a free Apple ID has room for one (7460 "You
+  already have a current iOS Development certificate"; AltStore revokes one
+  whenever it holds none of the team's keys). Owner, 1.1.0: BariStore on an
+  iPhone and an iPad with one Apple ID revoked each other's certificate
+  (1.1.0 revoked every "BariStore" certificate on 7460), so the other
+  device's apps showed "Not Verified" until refreshed. Now nothing is revoked
+  without asking (SideStore asks too); a BariStore certificate this device
+  has no key for is named as another device's, with "Import that device's
+  certificate instead". Options › Apple ID › Certificates › Import takes the
+  .p12 Export made there (PBES2: PBKDF2-HMAC-SHA1/256, AES-128/192/256-CBC;
+  ours and OpenSSL 3's; older 3DES/RC2 files are refused with a word), checks
+  the key matches, that the team lists the certificate, and keeps its key as
+  signing-key.der (AltServer keeps one certificate per team the same way).
+  Owner, 1.1.1 asked for a certificate per device, else one shared without
+  Import, "if possible": a team with room (a paid one) already gets a
+  certificate per device without a question; a free one has room for one.
+  Sharing it by itself is not possible: the key never leaves the device that
+  made it (Apple keeps only the certificate) and BariStore has no server;
+  deriving it from the password would make the key file a password oracle.
+  So Import stays. One certificate does work on several devices: each one
+  registers itself and gets a profile listing it (AltServer signs for every
+  device with one).
 - JIT as StikDebug does it: iOS 26.4+ installs the DDI as a cryptex through
   cryptexd (read-personalization-id, get-nonce with the identity's
   Cryptex1,NonceDomain, a Cryptex1 ticket from TSS gs.apple.com, install with
@@ -357,6 +422,14 @@ against a mock device, CSR and PKCS#12 with openssl (3.x and 1.1.1), signatures
 with rcodesign. **Device-verified (owner):** LocalDevVPN check, pairing (0.1.0); Apple sign-in
 with 2FA, signing and installing an app (0.10.0-alpha.3).
 Everything else: say "untested on device" until the owner confirms.
+Linux-verified for 1.1.1: the .p12 reader on ours and OpenSSL 3's (wrong
+password refused), a lost connection tried again, free/paid teams from
+listTeams' memberships; the page in Playwright against a mock server
+(no "iPhone" left, paid team without limits, free team's limits, source
+errors hidden while fetching, Certificates › Import sends the file and its
+password, LiveContainer's button after a task, Clear cache and Clear stored
+IPAs with their sizes and warnings); the real server's two clearings on a
+temp home (stored IPAs kept by the one, the only ones deleted by the other).
 Linux-verified for 1.1.0: hashes against RustCrypto (x86_64; aarch64 under
 qemu, instructions and software alike); a one-pass signature (load command,
 page hashes, special slots, CMS verified by OpenSSL); an app with a

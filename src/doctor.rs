@@ -65,7 +65,10 @@ pub async fn report(checks: bool) -> String {
         Some(a) => { let _ = writeln!(out, "Apple ID    {} (token fresh: {})", short(&a.email, 3), a.token_fresh()); }
         None => { let _ = writeln!(out, "Apple ID    not signed in"); }
     }
-    let _ = writeln!(out, "team        {}", std::fs::read_to_string(state::path("team")).unwrap_or_default().lines().next().unwrap_or("-"));
+    let team = std::fs::read_to_string(state::path("team")).unwrap_or_default();
+    let mut lines = team.lines();
+    let _ = writeln!(out, "team        {}{}", lines.next().unwrap_or("-"),
+                     lines.nth(1).map(|kind| format!(" ({kind})")).unwrap_or_default());
     if checks {
         let chosen = apple::anisette::chosen();
         let servers: Vec<&str> = match &chosen {

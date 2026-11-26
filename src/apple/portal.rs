@@ -15,7 +15,7 @@ pub const MACHINE_NAME: &str = "BariStore";
 /// submitDevelopmentCSR's code when the team has no room for a certificate.
 pub const CERTS_FULL: i64 = 7460;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 /// A development certificate as the portal lists it.
 pub struct DevCert {
     pub der: Vec<u8>,
@@ -65,6 +65,21 @@ pub struct Team {
     pub id: String,
     pub name: String,
     pub kind: String,
+    /// A free Apple ID's team (the Xcode free provisioning membership):
+    /// 10 App IDs a week, 7-day profiles, 3 apps on a device. Paid teams
+    /// (the Apple Developer Program) have none of these limits.
+    pub free: bool,
+}
+
+/// Whether listTeams describes a free team, as AltSign reads it: a company
+/// is paid; an individual is free when its only membership is the free one
+/// (no memberships at all: treated as free, the stricter case).
+fn is_free(t: &Dictionary) -> bool {
+    if s(t, "type") == "Company/Organization" || s(t, "type") == "In-House" {
+        return false;
+    }
+    let names: Vec<String> = list(t, "memberships").iter().map(|m| s(m, "name").to_lowercase()).collect();
+    names.is_empty() || (names.len() == 1 && names[0].contains("free"))
 }
 
 #[derive(Clone, Debug)]
@@ -134,7 +149,8 @@ impl Portal<'_> {
 
     pub async fn teams(&self) -> Result<Vec<Team>, PortalError> {
         let r = self.call("listTeams", None, Dictionary::new()).await?;
-        Ok(list(&r, "teams").into_iter().map(|t| Team { id: s(t, "teamId"), name: s(t, "name"), kind: s(t, "type") }).collect())
+        Ok(list(&r, "teams").into_iter()
+            .map(|t| Team { id: s(t, "teamId"), name: s(t, "name"), kind: s(t, "type"), free: is_free(t) }).collect())
     }
 
     /// Registers the device unless the team already has it.
@@ -186,20 +202,17 @@ impl Portal<'_> {
     }
 
     /// Our development certificate and its key, reused while Apple still
-    /// lists it; a new one otherwise. When the team is full (7460), only
-    /// certificates BariStore itself made are revoked: other tools' certificates
-    /// keep their apps running, so the caller asks which one may go
-    /// (CERTS_FULL).
+    /// lists it; a new one otherwise. When the team has no room (7460),
+    /// nothing is revoked here: a certificate BariStore cannot sign with is
+    /// another tool's, or BariStore's on another device with this Apple ID,
+    /// and revoking it stops that one's apps; the caller asks (CERTS_FULL).
     pub async fn certificate(&self, team: &str) -> Result<DevCert, PortalError> {
         let key = load_or_create_key().map_err(err)?;
         let modulus = key.to_public_key().to_pkcs1_der().map_err(|e| err(e.to_string()))?.as_bytes().to_vec();
-        let certs = self.certificates(team).await?;
-        for c in &certs {
+        for c in &self.certificates(team).await? {
             if let Some(content) = c.get("certContent").and_then(Value::as_data) {
-                if let Ok(info) = der::cert_info(content) {
-                    if spki_matches(info.spki, &modulus) {
-                        return Ok(DevCert::listed(c, content, key));
-                    }
+                if der::cert_info(content).is_ok_and(|info| spki_matches(info.spki, &modulus)) {
+                    return Ok(DevCert::listed(c, content, key));
                 }
             }
         }
@@ -209,21 +222,7 @@ impl Portal<'_> {
         body.insert("machineName".into(), Value::String(MACHINE_NAME.into()));
         let machine_id = uuid::Uuid::new_v4().to_string().to_uppercase();
         body.insert("machineId".into(), Value::String(machine_id.clone()));
-        let submitted = match self.call("submitDevelopmentCSR", Some(team), body.clone()).await {
-            Err(e) if e.code == CERTS_FULL => {
-                let ours: Vec<String> = certs.iter()
-                    .filter(|c| s(c, "machineName") == MACHINE_NAME).map(|c| s(c, "serialNumber")).collect();
-                if ours.is_empty() {
-                    return Err(PortalError { code: CERTS_FULL, message: "This Apple ID has no room for another \
-                        development certificate. Revoke one in Options › Apple ID › Certificates.".into() });
-                }
-                for serial in ours {
-                    self.revoke(team, &serial).await?;
-                }
-                self.call("submitDevelopmentCSR", Some(team), body).await?
-            }
-            other => other?,
-        };
+        let submitted = self.call("submitDevelopmentCSR", Some(team), body).await?;
         let request_id = submitted.get("certRequest").and_then(Value::as_dictionary)
             .map(|d| s(d, "certRequestId")).unwrap_or_default();
         for c in self.certificates(team).await? {
@@ -235,10 +234,30 @@ impl Portal<'_> {
                 if cert.machine_id.is_empty() {
                     cert.machine_id = machine_id;
                 }
+                logf!("portal: new certificate {}", cert.serial);
                 return Ok(cert);
             }
         }
         Err(err("Apple issued a certificate but does not list it yet; try again in a minute"))
+    }
+
+    /// Options › Apple ID › Certificates › Import: the key of a certificate
+    /// the team still lists (BariStore's on another device, exported there)
+    /// becomes the one BariStore signs with, so both devices sign with one
+    /// certificate and neither has to revoke the other's.
+    pub async fn adopt(&self, team: &str, cert_der: &[u8], key: &RsaPrivateKey) -> Result<String, PortalError> {
+        let modulus = key.to_public_key().to_pkcs1_der().map_err(|e| err(e.to_string()))?.as_bytes().to_vec();
+        let info = der::cert_info(cert_der).map_err(err)?;
+        if !spki_matches(info.spki, &modulus) {
+            return Err(err("The key in the file does not belong to its certificate."));
+        }
+        let listed = self.certificates(team).await?.into_iter()
+            .find(|c| c.get("certContent").and_then(Value::as_data) == Some(cert_der))
+            .ok_or_else(|| err("This Apple ID does not list that certificate: it belongs to another Apple ID, or it \
+                                was revoked. Export it again where BariStore signs with it."))?;
+        let der = key.to_pkcs8_der().map_err(|e| err(e.to_string()))?;
+        state::write_private(&state::path("signing-key.der"), der.as_bytes()).map_err(|e| err(e.to_string()))?;
+        Ok(DevCert::listed(&listed, cert_der, key.clone()).serial)
     }
 
     pub async fn app_ids(&self, team: &str) -> Result<Vec<AppId>, PortalError> {
@@ -261,9 +280,28 @@ impl Portal<'_> {
         Ok(r.get("appId").and_then(Value::as_dictionary).map(to_app_id).unwrap_or_else(|| app.clone()))
     }
 
-    /// Creates the group when missing, enables App Groups on the App ID and
-    /// assigns the group. Returns false when the team refuses groups.
-    pub async fn assign_group(&self, team: &str, app: &AppId, group: &str) -> Result<bool, PortalError> {
+    /// The portal's id of an app group, created when missing; None when the
+    /// team refuses groups.
+    pub async fn group_id(&self, team: &str, group: &str) -> Result<Option<String>, PortalError> {
+        let r = self.call("listApplicationGroups", Some(team), Dictionary::new()).await?;
+        if let Some(g) = list(&r, "applicationGroupList").into_iter().find(|g| s(g, "identifier") == group) {
+            return Ok(Some(s(g, "applicationGroup")));
+        }
+        let mut body = Dictionary::new();
+        body.insert("identifier".into(), Value::String(group.into()));
+        body.insert("name".into(), Value::String(clean_name(&format!("BariStore {group}"))));
+        match self.call("addApplicationGroup", Some(team), body).await {
+            Ok(r) => Ok(r.get("applicationGroup").and_then(Value::as_dictionary).map(|g| s(g, "applicationGroup"))),
+            Err(e) => {
+                logf!("portal: cannot create group {group}: {e}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Enables App Groups on the App ID when it is off and assigns the group
+    /// (`group_id`). Returns false when the team refuses.
+    pub async fn assign_group(&self, team: &str, app: &AppId, group_id: &str) -> Result<bool, PortalError> {
         if app.features.get("APG3427HIY").and_then(Value::as_boolean) != Some(true) {
             let mut f = Dictionary::new();
             f.insert("APG3427HIY".into(), Value::Boolean(true));
@@ -271,25 +309,9 @@ impl Portal<'_> {
                 return Ok(false);
             }
         }
-        let r = self.call("listApplicationGroups", Some(team), Dictionary::new()).await?;
-        let mut group_id = list(&r, "applicationGroupList").into_iter()
-            .find(|g| s(g, "identifier") == group).map(|g| s(g, "applicationGroup"));
-        if group_id.is_none() {
-            let mut body = Dictionary::new();
-            body.insert("identifier".into(), Value::String(group.into()));
-            body.insert("name".into(), Value::String(clean_name(&format!("BariStore {group}"))));
-            match self.call("addApplicationGroup", Some(team), body).await {
-                Ok(r) => group_id = r.get("applicationGroup").and_then(Value::as_dictionary).map(|g| s(g, "applicationGroup")),
-                Err(e) => {
-                    logf!("portal: cannot create group {group}: {e}");
-                    return Ok(false);
-                }
-            }
-        }
-        let Some(group_id) = group_id else { return Ok(false) };
         let mut body = Dictionary::new();
         body.insert("appIdId".into(), Value::String(app.id.clone()));
-        body.insert("applicationGroups".into(), Value::String(group_id));
+        body.insert("applicationGroups".into(), Value::String(group_id.into()));
         Ok(self.call("assignApplicationGroupToAppId", Some(team), body).await.is_ok())
     }
 
@@ -409,6 +431,25 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
         assert!(text.contains("verify OK") || text.contains("Certificate request self-signature verify OK"), "{text}");
         assert!(text.contains("BariStore"), "{text}");
+    }
+
+    #[test]
+    fn free_and_paid_teams() {
+        let team = |kind: &str, memberships: &[&str]| {
+            let mut d = Dictionary::new();
+            d.insert("type".into(), Value::String(kind.into()));
+            d.insert("memberships".into(), Value::Array(memberships.iter().map(|n| {
+                let mut m = Dictionary::new();
+                m.insert("name".into(), Value::String((*n).into()));
+                Value::Dictionary(m)
+            }).collect()));
+            d
+        };
+        assert!(is_free(&team("Individual", &["Xcode Free Provisioning Program"])));
+        assert!(is_free(&team("Individual", &[])));
+        assert!(!is_free(&team("Individual", &["Apple Developer Program"])));
+        assert!(!is_free(&team("Individual", &["Apple Developer Program", "Xcode Free Provisioning Program"])));
+        assert!(!is_free(&team("Company/Organization", &[])));
     }
 
     #[test]

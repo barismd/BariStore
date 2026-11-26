@@ -1,6 +1,6 @@
 //! Lockdown-style services reached through RSD ("*.shim.remote"): u32 BE
 //! length + XML plist, opened with the RSDCheckin exchange. On top: AFC,
-//! installation_proxy, house_arrest, lockdown GetValue and AMFI actions.
+//! installation_proxy, house_arrest and lockdown GetValue.
 
 use plist::{Dictionary, Value};
 use super::session::Session;
@@ -10,7 +10,6 @@ pub const LOCKDOWN: &[&str] = &["com.apple.mobile.lockdown.remote.trusted", "com
 pub const AFC: &[&str] = &["com.apple.afc.shim.remote"];
 pub const INSTALL: &[&str] = &["com.apple.mobile.installation_proxy.shim.remote"];
 pub const HOUSE_ARREST: &[&str] = &["com.apple.mobile.house_arrest.shim.remote"];
-pub const AMFI: &[&str] = &["com.apple.amfi.lockdown.shim.remote"];
 pub const MISAGENT: &[&str] = &["com.apple.misagent.shim.remote"];
 
 fn io(e: std::io::Error) -> String {
@@ -36,7 +35,7 @@ impl ServiceConn {
         }
         let second = s.recv().await?;
         if let Some(e) = second.get("Error") {
-            return Err(format!("the iPhone refused {}: {e:?}", names[0]));
+            return Err(format!("the device refused {}: {e:?}", names[0]));
         }
         if second.get("Request").and_then(Value::as_string) != Some("StartService") {
             return Err(format!("unexpected StartService answer: {second:?}"));
@@ -79,9 +78,9 @@ fn dict(pairs: &[(&str, Value)]) -> Dictionary {
     d
 }
 
-// --- lockdown / AMFI -------------------------------------------------------
+// --- lockdown --------------------------------------------------------------
 
-/// Some(true/false) for Developer Mode, None when the iPhone does not say.
+/// Some(true/false) for Developer Mode, None when the device does not say.
 pub async fn developer_mode(session: &Session) -> Result<Option<bool>, String> {
     let mut s = ServiceConn::open(session, LOCKDOWN).await?;
     let reply = s.request(&dict(&[
@@ -91,21 +90,6 @@ pub async fn developer_mode(session: &Session) -> Result<Option<bool>, String> {
         ("Key", Value::String("DeveloperModeStatus".into())),
     ])).await?;
     Ok(reply.get("Value").and_then(Value::as_boolean))
-}
-
-/// AMFI action 0 reveals the Developer Mode switch in Settings (no restart);
-/// action 1 turns it on and restarts (refused while a passcode is set).
-/// iOS closes the service after one request, so each call opens a new one.
-pub async fn amfi_action(session: &Session, action: u64) -> Result<(), String> {
-    let mut s = ServiceConn::open(session, AMFI).await?;
-    match s.request(&dict(&[("action", Value::Integer(action.into()))])).await {
-        Ok(reply) if reply.get("success").and_then(Value::as_boolean) == Some(true) => Ok(()),
-        Ok(reply) => Err(reply.get("Error").or(reply.get("error"))
-            .map(|e| format!("{e:?}")).unwrap_or_else(|| "refused".into())),
-        // turn-on restarts before answering
-        Err(_) if action == 1 => Ok(()),
-        Err(e) => Err(e),
-    }
 }
 
 // --- AFC -------------------------------------------------------------------
@@ -302,7 +286,7 @@ pub async fn install_profile(session: &Session, profile: &[u8]) -> Result<(), St
     ])).await?;
     match reply.get("Status").and_then(Value::as_unsigned_integer) {
         Some(0) => Ok(()),
-        status => Err(format!("the iPhone refused the profile (status {status:?})")),
+        status => Err(format!("the device refused the profile (status {status:?})")),
     }
 }
 

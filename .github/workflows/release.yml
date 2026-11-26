@@ -34,8 +34,12 @@ jobs:
           notes="Built by CI from ${GITHUB_SHA} on $(date -u +%Y-%m-%d). Install: https://barismd.github.io/BariStore/"
           # v<version>: one release per version. A stable one becomes the
           # latest release (install.sh and "baristore update" download it);
-          # alpha/beta/rc are prereleases.
+          # alpha/beta/rc are prereleases. A version built again replaces its
+          # release, so its tag, notes and files all belong to this build;
+          # the files go up with the release (gh publishes it once they are).
           kind="--latest"; case "$version" in *-*) kind="--prerelease";; esac
-          gh release view "v$version" >/dev/null 2>&1 || \
-            gh release create "v$version" $kind --title "BariStore $version" --notes "$notes" --target "${GITHUB_SHA}"
-          gh release upload "v$version" baristore-aarch64 baristore-aarch64.sha256 --clobber
+          if gh release view "v$version" >/dev/null 2>&1; then
+            gh release delete "v$version" --cleanup-tag --yes
+          fi
+          gh release create "v$version" $kind --title "BariStore $version" --notes "$notes" --target "${GITHUB_SHA}" \
+            baristore-aarch64 baristore-aarch64.sha256

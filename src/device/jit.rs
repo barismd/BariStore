@@ -3,7 +3,7 @@
 //!
 //! 1. The Developer Disk Image: on iOS 26.4+ a cryptex, installed through
 //!    cryptexd (`com.apple.security.cryptexd.remote`) with a Cryptex1 ticket
-//!    Apple's TSS signs for this iPhone. The files come from
+//!    Apple's TSS signs for this device. The files come from
 //!    doronz88/DeveloperDiskImage, as StikDebug downloads them.
 //! 2. The app is launched stopped through CoreDevice's app service.
 //! 3. debugserver (`com.apple.internal.dt.remote.debugproxy`, there once the
@@ -163,7 +163,7 @@ async fn ddi_files(progress: &(dyn Fn(String) + Send + Sync)) -> Result<(Diction
     Ok((identity, payloads))
 }
 
-/// Apple's Cryptex1 ticket for this iPhone and nonce (TSS).
+/// Apple's Cryptex1 ticket for this device and nonce (TSS).
 async fn cryptex_ticket(identity: &Dictionary, chip: &Dictionary, nonce: &[u8]) -> Result<Vec<u8>, String> {
     let mut req = Dictionary::new();
     let mut put = |k: &str, v: Value| { req.insert(k.into(), v); };
@@ -181,10 +181,10 @@ async fn cryptex_ticket(identity: &Dictionary, chip: &Dictionary, nonce: &[u8]) 
     let production = match get(chip, "img4_chip_cpro") {
         Some(Value::Boolean(b)) => *b,
         Some(Value::Integer(i)) => i.as_unsigned().unwrap_or(0) != 0,
-        _ => return Err("the iPhone did not say whether it is a production device".into()),
+        _ => return Err("the device did not say whether it is a production device".into()),
     };
     put("Cryptex1,ProductionMode", Value::Boolean(production));
-    let field = |k: &str| get(chip, k).and_then(Value::as_unsigned_integer).ok_or(format!("the iPhone sent no {k}"));
+    let field = |k: &str| get(chip, k).and_then(Value::as_unsigned_integer).ok_or(format!("the device sent no {k}"));
     let mut udid = field("img4_chip_chip")?.to_be_bytes().to_vec();
     udid.extend_from_slice(&field("img4_chip_ecid")?.to_be_bytes());
     put("Cryptex1,UDID", Value::Data(udid));
@@ -222,7 +222,7 @@ pub async fn ensure_ddi(session: &Session, progress: &(dyn Fn(String) + Send + S
         return Ok(false);
     }
     let (identity, payloads) = ddi_files(progress).await?;
-    progress("Asking Apple to sign the disk image for this iPhone".into());
+    progress("Asking Apple to sign the disk image for this device".into());
     let chip = cryptexd(session, "read-personalization-id", d(vec![]), &[]).await?
         .and_then(Value::into_dictionary).ok_or("cryptexd sent no personalization identifiers")?;
     let domain = number(get(&identity, "Cryptex1,NonceDomain"), "Cryptex1,NonceDomain")?;
@@ -298,10 +298,10 @@ async fn launch(session: &Session, bundle_id: &str, stopped: bool) -> Result<u64
     ]);
     x.send(&request, true).await?;
     let reply = tokio::time::timeout(Duration::from_secs(60), x.recv()).await
-        .map_err(|_| "the iPhone did not answer the launch".to_string())??.to_plist();
+        .map_err(|_| "the device did not answer the launch".to_string())??.to_plist();
     let reply = reply.into_dictionary().ok_or("the launch answer is not a dictionary")?;
     let Some(output) = reply.get("CoreDevice.output").and_then(Value::as_dictionary) else {
-        return Err(format!("the iPhone did not launch the app: {:?}", reply.get("CoreDevice.error")));
+        return Err(format!("the device did not launch the app: {:?}", reply.get("CoreDevice.error")));
     };
     output.get("processToken").and_then(Value::as_dictionary).and_then(|t| t.get("processIdentifier"))
         .and_then(Value::as_unsigned_integer).ok_or_else(|| "the launch answer has no process id".into())

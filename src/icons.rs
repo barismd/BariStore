@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crate::{logf, state};
 
@@ -232,9 +231,8 @@ async fn original(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> 
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("not a web address".into());
     }
-    let resp = http.get(url).timeout(Duration::from_secs(30)).send().await
-        .and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
-    Ok(resp.bytes().await.map_err(|e| e.to_string())?.to_vec())
+    let resp = crate::store::get(http, url, "image/*").await?.error_for_status().map_err(|e| e.to_string())?;
+    Ok(resp.bytes().await.map_err(|e| crate::store::chain(&e))?.to_vec())
 }
 
 /// The image at `url` fitted into `size` (one of SIZES), from the cache or

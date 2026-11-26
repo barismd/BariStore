@@ -16,7 +16,10 @@ use crate::{logf, state};
 pub struct Source {
     pub url: String,
     pub name: String,
-    #[serde(default)]
+    /// Why this run's last fetch failed, for the page. Never read back from
+    /// sources.json: an error saved by an earlier run showed as soon as the
+    /// page opened, before the new fetch had even started (owner, 1.1.0).
+    #[serde(default, skip_deserializing)]
     pub error: String,
 }
 
@@ -107,7 +110,8 @@ pub fn default_name(url: &str) -> Option<&'static str> {
 }
 
 pub fn save_sources(list: &[Source]) {
-    if let Ok(b) = serde_json::to_vec_pretty(list) {
+    let list: Vec<Source> = list.iter().map(|s| Source { error: String::new(), ..s.clone() }).collect();
+    if let Ok(b) = serde_json::to_vec_pretty(&list) {
         let _ = std::fs::write(state::path("sources.json"), b);
     }
     // A list saved by the user has seen every current default.
@@ -124,6 +128,41 @@ pub fn client() -> reqwest::Client {
         .timeout(Duration::from_secs(30))
         .build()
         .expect("HTTP client")).clone()
+}
+
+/// What went wrong, from an error's causes: reqwest's own words are only
+/// "error sending request for url"; DNS, refused, reset or TLS come after.
+pub fn chain(e: &dyn std::error::Error) -> String {
+    let mut causes = Vec::new();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        causes.push(c.to_string());
+        cause = c.source();
+    }
+    if causes.is_empty() { e.to_string() } else { causes.join(": ") }
+}
+
+/// A GET tried again (after 1 s, then 3 s) when it got no answer at all or
+/// a server error: Minis loses the odd connection, and a source that failed
+/// at once answered a moment later (owner, 1.1.0). A request that timed
+/// out is not tried again.
+pub async fn get(http: &reqwest::Client, url: &str, accept: &str) -> Result<reqwest::Response, String> {
+    let mut waits = [1u64, 3].into_iter();
+    loop {
+        let sent = http.get(url).header("Accept", accept).send().await;
+        let why = match &sent {
+            Ok(r) if r.status().is_server_error() => format!("HTTP {}", r.status().as_u16()),
+            Err(e) if !e.is_timeout() => chain(e),
+            _ => return sent.map_err(|e| if e.is_timeout() { "it did not answer in time".into() } else { chain(&e) }),
+        };
+        match waits.next() {
+            Some(wait) => {
+                logf!("store: {url}: {why}; trying again in {wait} s");
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+            None => return sent.map_err(|e| chain(&e)),
+        }
+    }
 }
 
 fn text(v: &Json, k: &str) -> String {
@@ -233,9 +272,9 @@ struct Pick {
 
 const PICKS: &[Pick] = &[
     Pick { name: "SideStore", bundle_id: "com.SideStore.SideStore", repo: "SideStore/SideStore", asset: "SideStore.ipa",
-           developer: "SideStore Team", subtitle: "Sideload apps and refresh them on your iPhone", nightly: true,
+           developer: "SideStore Team", subtitle: "Sideload apps and refresh them on your device", nightly: true,
            recommended: false, category: "stores",
-           description: "An app store that installs and refreshes apps on the iPhone itself over LocalDevVPN. \
+           description: "An app store that installs and refreshes apps on the device itself over LocalDevVPN. \
                          BariStore gives it the pairing file and the signing certificate.",
            icon: "https://raw.githubusercontent.com/SideStore/SideStore/develop/AltStore/Resources/Icons.xcassets/AppIcon.appiconset/180.png" },
     Pick { name: "LiveContainer + SideStore", bundle_id: "com.kdt.livecontainer", repo: "LiveContainer/LiveContainer",
@@ -308,7 +347,7 @@ async fn picks(http: &reqwest::Client) -> Vec<App> {
     for pick in PICKS {
         if !cache.contains_key(pick.repo) {
             let url = format!("https://api.github.com/repos/{}/releases?per_page=30", pick.repo);
-            let list = match http.get(&url).header("Accept", "application/vnd.github+json").send().await {
+            let list = match get(http, &url, "application/vnd.github+json").await {
                 Ok(r) if r.status().is_success() => r.json::<Vec<Json>>().await.unwrap_or_default(),
                 Ok(r) => { logf!("store: {url}: HTTP {}", r.status()); Vec::new() }
                 Err(e) => { logf!("store: {url}: {e}"); Vec::new() }
@@ -362,13 +401,14 @@ pub async fn refresh() -> (Vec<App>, Vec<Source>) {
         let http = http.clone();
         let s = s.clone();
         async move {
-            let r = http.get(&s.url).send().await;
-            let doc = match r {
-                Ok(r) if r.status().is_success() => r.json::<Json>().await.map_err(|e| format!("not an AltSource: {e}")),
+            let doc = match get(&http, &s.url, "application/json").await {
+                Ok(r) if r.status().is_success() => r.json::<Json>().await.map_err(|e| format!("not an AltSource: {}", chain(&e))),
                 Ok(r) => Err(format!("the source answered HTTP {}", r.status().as_u16())),
-                Err(e) if e.is_timeout() => Err("the source did not answer in time".into()),
-                Err(e) => { logf!("store: {}: {e}", s.url); Err("could not reach the source".into()) }
+                Err(e) => Err(format!("could not reach the source ({e})")),
             };
+            if let Err(e) = &doc {
+                logf!("store: {}: {e}", s.url);
+            }
             (s, doc)
         }
     });
@@ -666,6 +706,30 @@ mod tests {
         let names = directory_names(&bytes[at as usize..(at + size) as usize]);
         assert_eq!(names.len(), 6);
         assert_eq!(crate::sign::bundle::extension_counts(names.iter().map(String::as_str)), (2, 1));
+    }
+
+    /// A connection lost at once is tried again; the answer after it counts.
+    #[tokio::test]
+    async fn a_lost_connection_is_tried_again() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            drop(first);
+            let (mut second, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = second.read(&mut buf).await;
+            second.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        });
+        let started = std::time::Instant::now();
+        let r = get(&reqwest::Client::new(), &format!("http://127.0.0.1:{port}/apps.json"), "application/json").await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        // Nothing listening at all: an error with its cause, after the tries.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
+        let e = get(&reqwest::Client::new(), &format!("http://127.0.0.1:{closed}/"), "application/json").await.unwrap_err();
+        assert!(e.contains("refused"), "{e}");
     }
 
     #[test]

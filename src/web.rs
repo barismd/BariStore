@@ -1,5 +1,5 @@
 //! The page: a tiny HTTP/1.1 server on 127.0.0.1 under a 128-bit random path
-//! (other apps and websites on the iPhone can reach a loopback port, but not
+//! (other apps and websites on the device can reach a loopback port, but not
 //! guess the path), Host checked against the loopback (no DNS rebinding).
 //! Shown in Minis's browser sheet with minis-open. A file handed to another
 //! app (Install to LiveContainer) has an address of its own, see `Share`.
@@ -296,7 +296,7 @@ async fn upload(stream: &mut TcpStream, first: &[u8], length: usize) -> Json {
     drop(file);
     if !saved {
         let _ = std::fs::remove_file(&path);
-        return fail("Cannot save the file (is the iPhone full?).");
+        return fail("Cannot save the file (is the device full?).");
     }
     if received < length {
         let _ = std::fs::remove_file(&path);
@@ -332,7 +332,7 @@ struct Sent {
 type Shares = Mutex<HashMap<String, (std::path::PathBuf, u64, Arc<Sent>)>>;
 static SHARES: std::sync::LazyLock<Shares> = std::sync::LazyLock::new(Default::default);
 
-/// A file handed to another app on this iPhone by address (Install to
+/// A file handed to another app on this device by address (Install to
 /// LiveContainer: LiveContainer downloads it like any other IPA). Served at
 /// /share/<128-bit random>/<file name> to whoever asks 127.0.0.1 for it,
 /// without the page's token, until dropped.
@@ -514,7 +514,7 @@ async fn action(app: &App, r: &Json) -> Json {
                 if let Err(e) = app.device().await {
                     return fail(e);
                 }
-                // What is on the iPhone (whether LiveContainer is, for one).
+                // What is on the device (whether LiveContainer is, for one).
                 app.load_device_apps().await.ok();
             }
             ok("connected")
@@ -525,9 +525,6 @@ async fn action(app: &App, r: &Json) -> Json {
             app.spawn("Pairing", Some(json!({"action": "pair", "player": true})), move |a| async move { a.pair(player).await });
             ok("started")
         }
-        "devmode_status" => { app.spawn("Developer Mode", Some(r.clone()), |a| async move { a.developer_mode(None).await }); ok("started") }
-        "devmode_show" => { app.spawn("Developer Mode", Some(r.clone()), |a| async move { a.developer_mode(Some(0)).await }); ok("started") }
-        "devmode_on" => { app.spawn("Developer Mode", None, |a| async move { a.developer_mode(Some(1)).await }); ok("started") }
         "login" => {
             let (email, password) = (s(r, "email"), s(r, "password"));
             if email.is_empty() || password.is_empty() {
@@ -600,7 +597,11 @@ async fn action(app: &App, r: &Json) -> Json {
             ok("started")
         }
         "clear_cache" => ok(&app.clear_cache()),
-        "cache_size" => json!({"ok": true, "bytes": app.cache_size()}),
+        "clear_ipas" => ok(&app.clear_ipas()),
+        "cache_size" => {
+            let (cache, ipas) = app.cache_sizes();
+            json!({"ok": true, "cache": cache, "ipas": ipas})
+        }
         "refresh" => {
             let id = s(r, "bundle_id");
             app.spawn_kept(&format!("Refreshing {}", s(r, "name")), Some(r.clone()), move |a| async move { a.refresh_app(&id).await });
@@ -635,7 +636,6 @@ async fn action(app: &App, r: &Json) -> Json {
         }
         "update_all" => { app.spawn_kept("Updating apps", Some(r.clone()), |a| async move { a.update_all().await }); ok("started") }
         "update" => { app.spawn_kept("Updating BariStore", Some(r.clone()), |a| async move { a.update().await }); ok("started") }
-        "device_apps" => match app.load_device_apps().await { Ok(()) => ok(""), Err(e) => fail(e) },
         "place_pairing" => {
             let id = s(r, "bundle_id");
             app.spawn("Pairing file", Some(r.clone()), move |a| async move { a.place_pairing(&id).await });
@@ -652,8 +652,14 @@ async fn action(app: &App, r: &Json) -> Json {
             app.spawn("Exporting the certificate", Some(r.clone()), |a| async move {
                 let file = a.export_certificate().await?;
                 a.offer_next(json!({"label": "Share the file", "share": file}));
-                Ok("BariStore-Certificate.p12 is ready. Apps that import it ask for this password:".into())
+                Ok("BariStore-Certificate.p12 is ready. BariStore on your other device (Certificates › Import) and \
+                    other apps that import it ask for this password:".into())
             });
+            ok("started")
+        }
+        "import_certificate" => {
+            let (p12, password) = (s(r, "base64"), s(r, "password"));
+            app.spawn("Importing a certificate", None, move |a| async move { a.import_certificate(&p12, &password).await });
             ok("started")
         }
         "lc_certificate" => {

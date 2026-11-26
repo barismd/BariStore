@@ -27,6 +27,7 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 - **Your App IDs under control.** See what uses each one, reuse the App IDs of deleted apps or type your own, keep or drop extensions, ask for Increased Memory Limit (later too: an update keeps it).
 - **Your own app icons.** Pick any picture as an app's icon when you install it, or change it later.
 - **Install into LiveContainer.** Send an app from Featured or an IPA from Files straight into LiveContainer; an app from one of your sources arrives with its source.
+- **One Apple ID on your iPhone and your iPad.** Export the signing certificate on one and import it on the other: both sign with it, and neither stops the other's apps. BariStore never revokes a certificate without asking.
 - **Works with the other tools.** SideStore, AltStore, LiveContainer + SideStore and StikDebug get the pairing file; the stores and LiveContainer get the signing certificate, so they can refresh themselves too.
 
 ## Install
@@ -62,6 +63,7 @@ something goes wrong.
 
 Apps last **7 days** (Refresh all renews them), **3** apps at a time (BariStore does not count; LiveContainer runs
 many apps inside one), **10** App IDs per 7 days (each app extension needs one; "Remove extensions" saves them).
+A paid developer account has none of these limits: BariStore notices it.
 
 ## Build
 
