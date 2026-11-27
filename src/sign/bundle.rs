@@ -1,12 +1,14 @@
-//! IPA in memory: find the bundles, rewrite identifiers, embed profiles, sign
-//! deepest-first, seal CodeResources, check the result, write the IPA.
+//! An IPA: find the bundles, rewrite identifiers, embed profiles, sign
+//! deepest-first, seal CodeResources, check the result, write the IPA. The
+//! archive stays in its file: only what signing changes is in memory.
 
 use plist::{Dictionary, Value};
 use sha2::Digest;
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufReader, Cursor, Read, Write};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use super::codesign::{self, Identity, Target};
 use crate::hash::{Sha1, Sha256};
@@ -52,7 +54,96 @@ pub struct Ipa {
     pub files: BTreeMap<String, Entry>,
     order: Vec<String>,
     /// The archive as read, for copying unchanged entries.
-    source: Vec<u8>,
+    source: zip::ZipArchive<Source>,
+}
+
+/// An IPA file read where it lies. Clones read the same file through a
+/// handle and buffer of their own (opened at their first read), so the
+/// threads that unpack it never move one another's position. Before 1.1.2
+/// the whole IPA was read into memory and the signed one built there too:
+/// about 2.5 times the IPA's size, which a big game took past the memory
+/// iOS leaves Minis (its kernel then refuses every allocation).
+struct Source {
+    path: Arc<PathBuf>,
+    len: u64,
+    pos: u64,
+    file: Option<std::fs::File>,
+    /// Where `file`'s own position is, and `buf` from `at` on.
+    file_pos: u64,
+    buf: Vec<u8>,
+    at: u64,
+}
+
+const SOURCE_BUFFER: usize = 256 << 10;
+
+impl Source {
+    fn open(path: &Path) -> Result<Source, String> {
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let len = file.metadata().map_err(|e| e.to_string())?.len();
+        Ok(Source { path: Arc::new(path.to_path_buf()), len, pos: 0, file: Some(file), file_pos: 0, buf: Vec::new(), at: 0 })
+    }
+
+    /// Reads at `self.pos` straight from the file.
+    fn read_file(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let file = match &mut self.file {
+            Some(f) => f,
+            None => {
+                self.file_pos = 0;
+                self.file.insert(std::fs::File::open(self.path.as_path())?)
+            }
+        };
+        if self.file_pos != self.pos {
+            file.seek(SeekFrom::Start(self.pos))?;
+        }
+        let n = file.read(out)?;
+        self.file_pos = self.pos + n as u64;
+        Ok(n)
+    }
+}
+
+impl Clone for Source {
+    fn clone(&self) -> Source {
+        Source { path: self.path.clone(), len: self.len, pos: self.pos, file: None, file_pos: 0, buf: Vec::new(), at: 0 }
+    }
+}
+
+impl Read for Source {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let buffered = self.pos >= self.at && self.pos < self.at + self.buf.len() as u64;
+        if !buffered {
+            if out.len() >= SOURCE_BUFFER {
+                let n = self.read_file(out)?;
+                self.pos += n as u64;
+                return Ok(n);
+            }
+            let mut buf = std::mem::take(&mut self.buf);
+            buf.resize(SOURCE_BUFFER, 0);
+            let n = self.read_file(&mut buf);
+            buf.truncate(*n.as_ref().unwrap_or(&0));
+            self.buf = buf;
+            self.at = self.pos;
+            if n? == 0 {
+                return Ok(0);
+            }
+        }
+        let start = (self.pos - self.at) as usize;
+        let n = out.len().min(self.buf.len() - start);
+        out[..n].copy_from_slice(&self.buf[start..start + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for Source {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(p) => Some(p),
+            SeekFrom::End(d) => self.len.checked_add_signed(d),
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = pos.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the start"))?;
+        Ok(self.pos)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,17 +303,19 @@ pub fn icon(path: &std::path::Path) -> Result<Vec<u8>, String> {
 }
 
 impl Ipa {
-    /// Reads an IPA. Only what signing changes or reads is kept in memory
-    /// (Mach-O files, plists, profiles, symlinks); every other file is hashed
-    /// as it is read and later copied from `bytes` as it was, so a big app
-    /// does not need its whole unpacked size in memory. Entries are unpacked
-    /// and hashed on several threads, the biggest spread first. `progress`
-    /// gets the compressed bytes done and their total, from those threads.
-    pub fn read(bytes: Vec<u8>, progress: &(dyn Fn(u64, u64) + Sync)) -> Result<Ipa, String> {
+    /// Reads the IPA at `path`. Only what signing changes or reads is kept in
+    /// memory (Mach-O files, plists, profiles, symlinks); every other file is
+    /// hashed as it is read and later copied from the file as it was, so a
+    /// big app needs neither its size nor its unpacked size in memory.
+    /// Entries are unpacked and hashed on several threads, the biggest spread
+    /// first. `progress` gets the compressed bytes done and their total, from
+    /// those threads. The file must stay as it is until the IPA is written.
+    pub fn read(path: &Path, progress: &(dyn Fn(u64, u64) + Sync)) -> Result<Ipa, String> {
         let mut files = BTreeMap::new();
         let mut order = Vec::new();
+        let source = zip::ZipArchive::new(Source::open(path)?).map_err(|e| format!("not an IPA (zip): {e}"))?;
         {
-            let mut zip = zip::ZipArchive::new(Cursor::new(&bytes[..])).map_err(|e| format!("not an IPA (zip): {e}"))?;
+            let mut zip = source.clone();
             let mut entries = Vec::new();
             for i in 0..zip.len() {
                 let f = zip.by_index_raw(i).map_err(|e| e.to_string())?;
@@ -265,7 +358,7 @@ impl Ipa {
                 }
             }
         }
-        Ok(Ipa { files, order, source: bytes })
+        Ok(Ipa { files, order, source })
     }
 
     pub fn bundles(&self) -> Result<Vec<Bundle>, String> {
@@ -421,18 +514,19 @@ impl Ipa {
         codesign::plist_xml(&Value::Dictionary(codesign::sorted(&top)))
     }
 
-    /// The signed IPA. Unchanged entries are copied over compressed as they
-    /// were; the new ones are compressed side by side, each into a zip of its
-    /// own, and copied in from there.
-    pub fn write(&self) -> Result<Vec<u8>, String> {
+    /// Writes the signed IPA to `out`; its size. Unchanged entries are copied
+    /// over compressed as they were; the new ones are compressed side by
+    /// side, each into a zip of its own, and copied in from there.
+    pub fn write(&self, out: &Path) -> Result<u64, String> {
         let mut new: Vec<(&String, &Entry)> = self.order.iter()
             .filter_map(|p| self.files.get(p).map(|e| (p, e)))
             .filter(|(_, e)| e.raw.is_none() && !e.symlink).collect();
         new.sort_by_key(|(_, e)| std::cmp::Reverse(e.data.len()));
         let packed: HashMap<&String, Vec<u8>> = new.iter().map(|(p, _)| *p)
             .zip(parallel(&new, |(path, entry)| pack(path, entry))?).collect();
-        let mut source = zip::ZipArchive::new(Cursor::new(&self.source[..])).map_err(|e| e.to_string())?;
-        let mut out = zip::ZipWriter::new(Cursor::new(Vec::with_capacity(self.source.len() + (1 << 20))));
+        let mut source = self.source.clone();
+        let file = std::fs::File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
+        let mut out = zip::ZipWriter::new(std::io::BufWriter::with_capacity(1 << 20, file));
         for path in &self.order {
             let Some(entry) = self.files.get(path) else { continue };
             if let Some(index) = entry.raw {
@@ -447,7 +541,8 @@ impl Ipa {
                 out.raw_copy_file(one.by_index_raw(0).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             }
         }
-        Ok(out.finish().map_err(|e| e.to_string())?.into_inner())
+        let file = out.finish().map_err(|e| e.to_string())?.into_inner().map_err(|e| e.error().to_string())?;
+        file.metadata().map(|m| m.len()).map_err(|e| e.to_string())
     }
 }
 
@@ -490,7 +585,7 @@ fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R, String> +
 
 /// One entry of the archive: kept whole when signing needs its bytes, else
 /// only hashed.
-fn read_entry(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, i: usize) -> Result<(String, Entry), String> {
+fn read_entry(zip: &mut zip::ZipArchive<Source>, i: usize) -> Result<(String, Entry), String> {
     let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
     let name = f.name().to_string();
     let mode = f.unix_mode().unwrap_or(0o644);
@@ -761,6 +856,38 @@ mod tests {
         codesign::plist_xml(&Value::Dictionary(d))
     }
 
+    /// The file reader the IPA is read through: reads of every size, seeks
+    /// from the start, the end and the current place, and clones that keep
+    /// places of their own, all give the file's bytes.
+    #[test]
+    fn source_reads_like_the_file() {
+        let path = std::env::temp_dir().join(format!("baristore-source-{}-{}", std::process::id(), rand::random::<u32>()));
+        let bytes: Vec<u8> = (0..SOURCE_BUFFER * 3 + 1234).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut a = Source::open(&path).unwrap();
+        let mut got = vec![0u8; 10];
+        a.read_exact(&mut got).unwrap();
+        assert_eq!(got, bytes[..10]);
+        let mut b = a.clone();
+        assert_eq!(a.seek(SeekFrom::End(-5)).unwrap(), bytes.len() as u64 - 5);
+        let mut tail = Vec::new();
+        a.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, bytes[bytes.len() - 5..]);
+        // The clone carries on where `a` was when it was made.
+        let mut big = vec![0u8; SOURCE_BUFFER + 100];
+        b.read_exact(&mut big).unwrap();
+        assert_eq!(big, bytes[10..10 + SOURCE_BUFFER + 100]);
+        assert_eq!(b.seek(SeekFrom::Current(-50)).unwrap(), (SOURCE_BUFFER + 60) as u64);
+        b.read_exact(&mut got).unwrap();
+        assert_eq!(got, bytes[SOURCE_BUFFER + 60..SOURCE_BUFFER + 70]);
+        assert!(b.seek(SeekFrom::Current(-(bytes.len() as i64))).is_err());
+        b.seek(SeekFrom::Start(3)).unwrap();
+        let mut all = Vec::new();
+        b.read_to_end(&mut all).unwrap();
+        assert_eq!(all, bytes[3..]);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// An app with a framework, a loose dylib and a resource, signed (the
     /// binaries of a depth side by side), a picture made its icon, packed
     /// (new entries compressed side by side) and read back.
@@ -784,9 +911,12 @@ mod tests {
             zip.start_file(*name, opts).unwrap();
             zip.write_all(data).unwrap();
         }
-        let bytes = zip.finish().unwrap().into_inner();
+        let dir = std::env::temp_dir().join(format!("baristore-ipa-{}-{}", std::process::id(), rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (input, output) = (dir.join("in.ipa"), dir.join("out.ipa"));
+        std::fs::write(&input, zip.finish().unwrap().into_inner()).unwrap();
         let reported = std::sync::Mutex::new(0);
-        let mut ipa = Ipa::read(bytes, &|done, total| *reported.lock().unwrap() = done * 100 / total).unwrap();
+        let mut ipa = Ipa::read(&input, &|done, total| *reported.lock().unwrap() = done * 100 / total).unwrap();
         assert_eq!(*reported.lock().unwrap(), 100);
         let main = ipa.main_app().unwrap();
         let mut picture = Cursor::new(Vec::new());
@@ -805,7 +935,10 @@ mod tests {
         let mut steps = Vec::new();
         sign(&mut ipa, &plan, &mut |n, t| steps.push((n, t))).unwrap();
         assert_eq!(steps.last(), Some(&(2, 2)));
-        let out = ipa.write().unwrap();
+        let size = ipa.write(&output).unwrap();
+        let out = std::fs::read(&output).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(size, out.len() as u64);
         let mut back = zip::ZipArchive::new(Cursor::new(&out[..])).unwrap();
         let mut read = |name: &str| {
             let mut f = back.by_name(name).unwrap_or_else(|_| panic!("{name} missing"));

@@ -180,19 +180,29 @@ impl Afc {
         self.op(OP_CLOSE, &handle.to_le_bytes(), &[]).await.map(|_| ())
     }
 
-    pub async fn write_file(&mut self, path: &str, data: &[u8], progress: &mut (dyn FnMut(usize, usize) + Send))
-        -> Result<(), String>
-    {
+    /// Writes `total` bytes from `data` (bytes in memory, or a file read a
+    /// piece at a time) to `path`.
+    pub async fn write_file(&mut self, path: &str, data: &mut (dyn std::io::Read + Send), total: u64,
+                            progress: &mut (dyn FnMut(u64, u64) + Send)) -> Result<(), String> {
         let handle = self.fopen(path, WRITE_TRUNCATE).await?;
         let mut sent = 0;
         // 1 MiB per write, as libimobiledevice's afcclient and idevice use.
-        for chunk in data.chunks(1 << 20) {
-            if let Err(e) = self.op(OP_WRITE, &handle.to_le_bytes(), chunk).await {
+        let mut chunk = vec![0u8; 1 << 20];
+        loop {
+            let n = match data.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = self.fclose(handle).await;
+                    return Err(e.to_string());
+                }
+            };
+            if let Err(e) = self.op(OP_WRITE, &handle.to_le_bytes(), &chunk[..n]).await {
                 let _ = self.fclose(handle).await;
                 return Err(e);
             }
-            sent += chunk.len();
-            progress(sent, data.len());
+            sent += n as u64;
+            progress(sent, total);
         }
         self.fclose(handle).await
     }
@@ -216,19 +226,24 @@ impl Afc {
 
 // --- installation_proxy ----------------------------------------------------
 
-/// Uploads `ipa` to /PublicStaging and installs it as a developer package.
-pub async fn install(session: &Session, ipa: &[u8], progress: &mut (dyn FnMut(&str, u32) + Send)) -> Result<(), String> {
+/// Uploads the IPA at `ipa` (read from the file a piece at a time) to
+/// /PublicStaging and installs it as a developer package.
+pub async fn install(session: &Session, ipa: &std::path::Path, progress: &mut (dyn FnMut(&str, u32) + Send))
+    -> Result<(), String>
+{
     let remote = format!("/PublicStaging/baristore-{}.ipa", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     {
         let started = std::time::Instant::now();
+        let mut file = std::fs::File::open(ipa).map_err(|e| e.to_string())?;
+        let size = file.metadata().map_err(|e| e.to_string())?.len();
         let mut afc = Afc::open(session).await?;
         let _ = afc.mkdir("/PublicStaging").await;
-        afc.write_file(&remote, ipa, &mut |done, total| {
+        afc.write_file(&remote, &mut file, size, &mut |done, total| {
             progress("Uploading", (done * 100 / total.max(1)) as u32);
         }).await?;
         let secs = started.elapsed().as_secs_f64();
-        crate::logf!("install: sent {} MB in {secs:.1} s ({:.1} MB/s)", ipa.len() / 1_000_000,
-                     ipa.len() as f64 / 1e6 / secs.max(0.001));
+        crate::logf!("install: sent {} MB in {secs:.1} s ({:.1} MB/s)", size / 1_000_000,
+                     size as f64 / 1e6 / secs.max(0.001));
     }
     let result = async {
         let mut s = ServiceConn::open(session, INSTALL).await?;

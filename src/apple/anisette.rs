@@ -5,10 +5,11 @@
 //! What Apple accepts changed in October/November 2026 (SideInstaller's
 //! `client_info_to_use`, siboot 0.20): servers on Apple's Android ADI library
 //! lead to -80046 at the token request, so only macOS- and Windows-library
-//! servers are used; a macOS-library server that names a Mac older than
-//! 10.13 is answered with -23782/-22406, so sign-in reports a current Mac
-//! instead. An identity is provisioned under the client info it signs in
-//! with, so each (server, client info) pair keeps its own identity.
+//! servers are used; the Mac older than 10.13 the macOS-library servers name
+//! is answered with -23782/-22406 for some accounts and refused the text
+//! message for others, so sign-in reports a current Mac first. An identity
+//! is provisioned under the client info it signs in with, so each (server,
+//! client info) pair keeps its own identity.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use futures_util::{SinkExt, StreamExt};
@@ -34,7 +35,11 @@ pub const SERVERS: &[&str] = &[
 ];
 
 const AKD_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
-const CURRENT_MAC_CLIENT_INFO: &str = "<MacBookPro18,3> <macOS;26.6;25F84> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+/// "Mac OS X", not "macOS": since 2026-11-19 Apple answers a client info
+/// with `<macOS;` with HTTP 503 (iloader #1203/#1205; 1.1.1's current Mac
+/// did, checked again 2026-11-27), the same Mac as `<Mac OS X;26.6;25F84>`
+/// is taken.
+const CURRENT_MAC_CLIENT_INFO: &str = "<MacBookPro18,3> <Mac OS X;26.6;25F84> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 const CURRENT_MAC_USER_AGENT: &str = "AuthKit/1 (Macintosh; OS X 26.6) (com.apple.akd/1.0)";
 /// Stock client infos of anisette-v3-server/omnisette: every public server
 /// that still hands them out runs Apple's Android library.
@@ -84,23 +89,25 @@ fn mac_version(client: &str) -> Option<(u32, u32)> {
 /// 2026-10-15, Xcode since September), so sign-in rotates through them; a
 /// 503 comes before the password is checked.
 ///
-/// Checked live on 2026-11-21 with a made-up account through all six
-/// macOS-library servers: as advertised (`<MacBookPro13,3> <Mac OS X;10.12.6>`,
-/// iloader 2.4.2's rollback of 2026-11-19) Apple answers -20970 ("account
-/// information entered incorrectly": it took the client and identity); as a
-/// current Mac it answers HTTP 503; a Windows PC claimed on them fails
-/// provisioning. Some accounts get -23782 (macOS 10.13 required) for the old
-/// Mac: they go on to the current Mac.
+/// Checked live on 2026-11-27 with a made-up account through the
+/// macOS-library servers: Apple answers -20970 ("account information
+/// entered incorrectly": it took the client and identity) both as advertised
+/// (`<MacBookPro13,3> <Mac OS X;10.12.6>`) and as the current Mac; the
+/// current Mac spelt `<macOS;` gets HTTP 503; a Windows PC claimed on them
+/// fails provisioning. The current Mac comes first: as the old Mac, Apple
+/// asks many accounts for a text message and then refuses to send it (a bare
+/// 403 since October 2026, iloader 2.4.1/2.4.2, xtool #345) or answers
+/// -23782 (macOS 10.13 required).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Claim {
-    /// Exactly what the server advertises.
-    Advertised,
     /// A current Mac, as SideStore and SideInstaller report.
     CurrentMac,
+    /// Exactly what the server advertises.
+    Advertised,
 }
 
 impl Claim {
-    pub const ALL: [Claim; 2] = [Claim::Advertised, Claim::CurrentMac];
+    pub const ALL: [Claim; 2] = [Claim::CurrentMac, Claim::Advertised];
 
     pub fn name(self) -> &'static str {
         match self {

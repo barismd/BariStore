@@ -574,6 +574,21 @@ fn directory_names(dir: &[u8]) -> Vec<String> {
     names
 }
 
+/// SHA-256 of a file in hex, read 1 MiB at a time.
+fn file_sha256(path: &std::path::Path) -> Option<String> {
+    use crate::hash::Sha256;
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let (mut hasher, mut buf) = (Sha256::new(), vec![0u8; 1 << 20]);
+    loop {
+        match file.read(&mut buf).ok()? {
+            0 => return Some(hex::encode(hasher.finalize())),
+            n => hasher.update(&buf[..n]),
+        }
+    }
+}
+
 /// Downloads `v` into ~/.baristore/ipas/, reusing a complete earlier copy.
 pub async fn download(v: &Version, progress: &(dyn Fn(u64, u64) + Send + Sync)) -> Result<std::path::PathBuf, String> {
     use crate::hash::Sha256;
@@ -587,9 +602,9 @@ pub async fn download(v: &Version, progress: &(dyn Fn(u64, u64) + Send + Sync)) 
     if let Ok(meta) = std::fs::metadata(&path) {
         let size_ok = v.size == 0 || meta.len() == v.size;
         // Hashing a big IPA takes a while on Minis's emulated CPU: off the
-        // async workers.
-        let sha_ok = v.sha256.is_empty() || tokio::task::block_in_place(|| std::fs::read(&path)
-            .map(|d| hex::encode(Sha256::digest(&d)) == v.sha256.to_lowercase()).unwrap_or(false));
+        // async workers, a piece at a time (never the whole IPA in memory).
+        let sha_ok = v.sha256.is_empty() || tokio::task::block_in_place(|| file_sha256(&path))
+            .is_some_and(|h| h == v.sha256.to_lowercase());
         if size_ok && sha_ok {
             return Ok(path);
         }

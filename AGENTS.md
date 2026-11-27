@@ -188,6 +188,12 @@ applied nor shown for it (owner, 1.1.1).
   count). 0.10.0-alpha.9's ping set SO_RCVTIMEO, never got an answer on the
   device and killed a healthy server every ~45 s (owner: installs stopped
   mid-way, the idle store closed); hence "answered once" and the long wait.
+  A server that ends otherwise is logged with its status ("supervisor: the
+  server stopped (signal: 6 …)"; 1.1.1 only told the terminal, so the log
+  showed restarts without a cause). A task's title and retry are in
+  `~/.baristore/task-running` while it runs: the next server shows a task
+  the last one stopped during as failed, with Try again (1.1.1's page just
+  reconnected to a server that knew of no task).
   Typed in the terminal while it runs: Return quits, `log` prints the log,
   anything else gets a hint (the owner typed `baristore log` there and it
   quit). `baristore log` prints the same report from a shell.
@@ -203,9 +209,20 @@ applied nor shown for it (owner, 1.1.1).
   The server's own stdout/stderr go to `~/.baristore/server.out` (Options ›
   Log shows its tail). Minis's agent shell kills a command's process group
   after 300 s (ISHExecutionCoordinator), another reason for the own group.
-  Memory: IPAs are streamed to disk and only Mach-O/plist entries are kept in
-  memory while signing; signing, packing, RSA key generation and hashing a
-  cached IPA run with `block_in_place`; icon and screenshot decoding is
+  Memory: IPAs are streamed to disk, read from their file while signing
+  (`bundle::Source`: a handle and 256 KiB buffer per reading thread), only
+  Mach-O/plist entries kept in memory, the signed IPA written to
+  `~/.baristore/signed.ipa` and sent from it 1 MiB at a time (removed once
+  sent; a leftover goes with `prune_files`), a cached IPA hashed 1 MiB at a
+  time. 1.1.1 held the whole IPA, then the whole signed one, in memory
+  (Reddit report, 2026-11-27: Critical Ops Revival on an iPhone 13 Pro Max
+  never installed: "memory allocation of 20320 bytes failed" in server.out,
+  the server hung in "Reading the app", every new server aborted for minutes;
+  a 663 MB synthetic Unity-like IPA peaked at 1656 MB, now 322 MB, linear
+  in its Mach-O files only). Minis's kernel (ish-arm64 kernel/mmap.c,
+  "memory brake") refuses every guest allocation while Minis is within 10%
+  of its iOS memory limit, until it is 15% below. Signing, packing, RSA key
+  generation and hashing a cached IPA run with `block_in_place`; icon and screenshot decoding is
   bounded, one icon and two screenshots at a time (the prefetch takes one
   turn at most), and a picture being made is not made again for a second
   request (the page and the prefetch asked for the same ones); one shared HTTP client
@@ -253,13 +270,22 @@ applied nor shown for it (owner, 1.1.1).
   prefs `isPairingReset=false`, `activePairingProtocol=rppairing`; LiveContainer's
   SideStore reads `SideStore/Documents/ALTPairingFile.mobiledevicepairing`;
   AltStore 2.3.1+ reads `Documents/ALTPairingFile.plist` (SideInstaller docs).
-- Apple sign-in, checked live 2026-11-21 with a made-up account (`baristore
-  doctor` repeats the check): through the macOS-library servers Apple takes
-  the client they advertise (`<MacBookPro13,3> <Mac OS X;10.12.6;16G29>`, UA
-  `akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0`, iloader 2.4.2) and answers a
-  current Mac with HTTP 503; a Windows claim fails provisioning there. Sign-in
-  rotates servers × claims (advertised, then current Mac for -23782). No
-  Android-library servers (-80046). Fresh HTTP/1.1 connection per GSA
+- Apple sign-in, checked live 2026-11-27 with a made-up account (Options ›
+  Run checks repeats the check): through the macOS-library servers Apple
+  takes the client they advertise (`<MacBookPro13,3> <Mac OS X;10.12.6;16G29>`,
+  UA `akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0`, iloader 2.4.2) and a current
+  Mac spelt `<MacBookPro18,3> <Mac OS X;26.6;25F84>`; spelt `<macOS;26.6;…>`
+  (1.1.1's) it answers HTTP 503 since 2026-11-19 (iloader #1203/#1205), so
+  1.1.1 only ever signed in as the old Mac. A Windows claim fails
+  provisioning there. Sign-in rotates servers × claims, current Mac first:
+  as the old Mac Apple asks many accounts for a text message (secondaryAuth,
+  even accounts that get codes on their devices elsewhere) and refuses to
+  send it with a bare 403 (issue #2, 2026-11-27: "text-message code requested
+  (403 Forbidden)", no SMS; the same in iloader, xtool, Impactor since
+  October). A refused text message (403, or Apple's serviceErrors such as
+  -28248) is NoCode: the other claim is tried instead of waiting for a code;
+  a 412 names the phone number's real id (xtool #424); -22979/-22981 keep
+  the last code. No Android-library servers (-80046). Fresh HTTP/1.1 connection per GSA
   request (isideload: reused ones get 5xx). Windows-library servers need the
   hsc 434 resync. One anisette identity per (server, client info). Email is
   lowercased. Credential codes -20101/-20970/-22406 stop sign-in.
@@ -422,6 +448,15 @@ against a mock device, CSR and PKCS#12 with openssl (3.x and 1.1.1), signatures
 with rcodesign. **Device-verified (owner):** LocalDevVPN check, pairing (0.1.0); Apple sign-in
 with 2FA, signing and installing an app (0.10.0-alpha.3).
 Everything else: say "untested on device" until the owner confirms.
+Linux-verified for 1.1.2: a 663 MB synthetic IPA (150 MB framework, 512 MB
+of assets) signed at 322 MB peak (1.1.1: 1656 MB), the archive the same as
+1.1.1's but for the re-signed binaries; the file reader against the file's
+bytes; Apple taking the current Mac spelt "Mac OS X" through five servers
+and refusing it spelt "macOS" (HTTP 503, new.ani.sidestore.io), live with a
+made-up account; the parsing of /auth's phone numbers and Apple's
+serviceErrors. Untested on
+device: the text-message code under the current Mac, the upload from the
+file, the stopped-task sheet.
 Linux-verified for 1.1.1: the .p12 reader on ours and OpenSSL 3's (wrong
 password refused), a lost connection tried again, free/paid teams from
 listTeams' memberships; the page in Playwright against a mock server

@@ -113,6 +113,9 @@ impl App {
                 };
             }
         }
+        if let Some(task) = stopped_task() {
+            app.inner.lock().unwrap().task = Some(task);
+        }
         prune_files();
         app
     }
@@ -208,8 +211,10 @@ impl App {
                 let mut i = app.inner.lock().unwrap();
                 i.task = Some(Task { title: title.clone(), ..Default::default() });
             }
+            mark_task(Some((&title, &retry)));
             logf!("task: start {title}");
             let result = job(app.clone()).await;
+            mark_task(None);
             // Before the next task can start: IPAs this one left unneeded.
             prune_files();
             let mut i = app.inner.lock().unwrap();
@@ -688,7 +693,6 @@ impl App {
         let started = std::time::Instant::now();
         let ipa_path = store::download(&v, &self.downloading()).await?;
         logf!("install: downloaded in {:.1} s", started.elapsed().as_secs_f64());
-        let bytes = tokio::task::block_in_place(|| std::fs::read(&ipa_path)).map_err(|e| e.to_string())?;
         let mut installed = Installed {
             original_id: entry.bundle_id.clone(), name: entry.name.clone(), version: v.version.clone(),
             source_url: v.url.clone(), ipa_path: ipa_path.to_string_lossy().into(), icon_url: entry.icon.clone(),
@@ -696,7 +700,7 @@ impl App {
             ..Default::default()
         };
         let reuse = replacing(&mut installed, reuse);
-        let done = self.sign_and_install(&mut job, bytes, opts, reuse, installed).await?;
+        let done = self.sign_and_install(&mut job, ipa_path, opts, reuse, installed).await?;
         Ok(done + &self.finish(&job).await)
     }
 
@@ -708,17 +712,16 @@ impl App {
         }
         let info = crate::sign::bundle::peek(path)?;
         let mut job = self.job().await?;
-        let bytes = tokio::task::block_in_place(|| std::fs::read(path)).map_err(|e| e.to_string())?;
         let mut installed = Installed {
             original_id: info.id, name: info.name, version: info.version, ipa_path: path.to_string_lossy().into(),
             icon_url: crate::icons::ipa_icon_url(path), ..Default::default()
         };
         let reuse = replacing(&mut installed, reuse);
-        let done = self.sign_and_install(&mut job, bytes, opts, reuse, installed).await?;
+        let done = self.sign_and_install(&mut job, path.to_path_buf(), opts, reuse, installed).await?;
         Ok(done + &self.finish(&job).await)
     }
 
-    async fn sign_and_install(&self, job: &mut Job, bytes: Vec<u8>, opts: Options, reuse: install::Reuse,
+    async fn sign_and_install(&self, job: &mut Job, ipa: std::path::PathBuf, opts: Options, reuse: install::Reuse,
                               mut entry: Installed) -> Result<String, String> {
         let ask = self.asker();
         let previous = (!entry.bundle_id.is_empty()).then(|| (entry.bundle_id.clone(), entry.ids.clone()));
@@ -730,7 +733,7 @@ impl App {
         let (app, app2) = (self.clone(), self.clone());
         let status = move |s: String| app.step(s);
         let progress = move |s: String, pct: u32| app2.progress(s, pct);
-        let prepared = install::prepare_and_sign(&ctx, &mut job.shared, bytes, &opts, &status, &progress).await?;
+        let prepared = install::prepare_and_sign(&ctx, &mut job.shared, ipa, &opts, &status, &progress).await?;
         if entry.version.is_empty() {
             entry.version = prepared.version.clone();
         }
@@ -751,7 +754,7 @@ impl App {
         entry.options = opts;
         let started = std::time::Instant::now();
         install::install_signed(&job.session, &prepared.ipa, entry.clone(), &status).await?;
-        logf!("install: uploaded and installed {} MB in {:.1} s", prepared.ipa.len() / 1_000_000,
+        logf!("install: uploaded and installed {} MB in {:.1} s", prepared.size / 1_000_000,
               started.elapsed().as_secs_f64());
         if let Some(record) = flow::load_record().filter(|_| install::reads_pairing_file(&entry.kind)) {
             self.step("Giving the app the pairing file");
@@ -936,9 +939,8 @@ impl App {
             let path = store::download(&v, &self.downloading()).await?;
             entry.ipa_path = path.to_string_lossy().into();
         }
-        let bytes = tokio::task::block_in_place(|| std::fs::read(&entry.ipa_path)).map_err(|e| e.to_string())?;
         let opts = entry.signing_options();
-        self.sign_and_install(job, bytes, opts, install::Reuse::default(), entry).await
+        self.sign_and_install(job, entry.ipa_path.clone().into(), opts, install::Reuse::default(), entry).await
     }
 
     /// The catalog's offer for an installed app: the same app from the same
@@ -985,9 +987,8 @@ impl App {
         let name = entry.name.clone();
         entry.version = v.version.clone();
         entry.source_url = v.url.clone();
-        let bytes = tokio::task::block_in_place(|| std::fs::read(&entry.ipa_path)).map_err(|e| e.to_string())?;
         let opts = entry.signing_options();
-        self.sign_and_install(job, bytes, opts, install::Reuse::default(), entry).await?;
+        self.sign_and_install(job, entry.ipa_path.clone().into(), opts, install::Reuse::default(), entry).await?;
         Ok(format!("{name} is updated to {}.", v.version))
     }
 
@@ -1572,12 +1573,41 @@ pub fn boot_id() -> &'static str {
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()))
 }
 
+/// The running task, kept in a file while it runs: a server that stops
+/// during it (iOS left Minis too little memory, it was killed when it hung,
+/// BariStore was closed) leaves the file, and the next server says so.
+fn mark_task(running: Option<(&str, &Option<Json>)>) {
+    let path = state::path("task-running");
+    match running {
+        Some((title, retry)) => { let _ = std::fs::write(&path, json!({"title": title, "retry": retry}).to_string()); }
+        None => { let _ = std::fs::remove_file(&path); }
+    }
+}
+
+/// The task the last server stopped during, as a failed one (its sheet
+/// shows why, with Try again), instead of a page that reconnects to a
+/// server that knows of no task.
+fn stopped_task() -> Option<Task> {
+    let path = state::path("task-running");
+    let saved: Json = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let title = saved["title"].as_str()?.to_string();
+    logf!("task: {title} did not finish: BariStore stopped during it");
+    Some(Task {
+        error: "BariStore stopped before this was done and started again: iOS may have left Minis too little \
+                memory, or BariStore was closed. Try again.".into(),
+        retry: saved.get("retry").filter(|r| !r.is_null()).cloned(),
+        title, done: true, ..Default::default()
+    })
+}
+
 /// Drops the IPAs no installed app needs (other versions, apps deleted or
 /// replaced, IPAs added but never installed) and broken downloads, and the
 /// icons chosen for no installed app. Files from the last hour stay: an
 /// install sheet may be open for one, or a failed install be tried again.
-/// Run while no task is.
+/// A signed IPA left by a task that stopped goes too. Run while no task is.
 fn prune_files() {
+    let _ = std::fs::remove_file(install::signed_path());
     let installed = install::installed();
     let keep: Vec<std::path::PathBuf> = installed.iter().map(|i| i.ipa_path.clone().into())
         .chain(installed.iter().flat_map(|i| [&i.options.icon, &i.custom_icon])

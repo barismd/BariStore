@@ -263,7 +263,9 @@ pub async fn shared(portal: &Portal<'_>, team: &str, udid: &str, device_name: &s
 }
 
 pub struct Prepared {
-    pub ipa: Vec<u8>,
+    /// The signed IPA (`signed_path`) and its size.
+    pub ipa: std::path::PathBuf,
+    pub size: u64,
     pub main_id: String,
     pub expires: u64,
     pub version: String,
@@ -417,7 +419,7 @@ pub async fn certificate(portal: &Portal<'_>, team: &str, ask: &Asker) -> Result
 /// `block_in_place`, so the page and the tunnel keep their worker. The
 /// profiles of an app and its extensions are asked for at the same time.
 #[allow(clippy::too_many_arguments)]
-pub async fn prepare_and_sign(ctx: &Context<'_>, shared: &mut Option<Shared>, ipa_bytes: Vec<u8>, opts: &Options,
+pub async fn prepare_and_sign(ctx: &Context<'_>, shared: &mut Option<Shared>, ipa_path: std::path::PathBuf, opts: &Options,
                               status: &(dyn Fn(String) + Send + Sync),
                               progress: &(dyn Fn(String, u32) + Send + Sync)) -> Result<Prepared, String> {
     let portal = Portal { gs: ctx.gs, account: ctx.account };
@@ -427,7 +429,7 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, shared: &mut Option<Shared>, ip
     let read_pct = Arc::new(AtomicU64::new(0));
     let reading = {
         let read_pct = read_pct.clone();
-        tokio::task::spawn_blocking(move || Ipa::read(ipa_bytes, &|done, total| {
+        tokio::task::spawn_blocking(move || Ipa::read(&ipa_path, &|done, total| {
             read_pct.fetch_max(done * 100 / total.max(1), Ordering::Relaxed);
         }))
     };
@@ -598,10 +600,10 @@ pub async fn prepare_and_sign(ctx: &Context<'_>, shared: &mut Option<Shared>, ip
         bundle::sign(&mut ipa, &plan, &mut |n, t| progress(format!("Signing {n} of {t}"), (n * 100 / t.max(1)) as u32))?;
         logf!("install: signed in {:.1} s", started.elapsed().as_secs_f64());
         status("Packing the app".into());
-        ipa.write()
+        ipa.write(&signed_path())
     })?;
     logf!("install: signed and packed in {:.1} s", started.elapsed().as_secs_f64());
-    Ok(Prepared { ipa: out, main_id: ids[&main.dir].clone(), expires: if expires == u64::MAX { 0 } else { expires },
+    Ok(Prepared { ipa: signed_path(), size: out, main_id: ids[&main.dir].clone(), expires: if expires == u64::MAX { 0 } else { expires },
                   version: main.version, ids, increased_memory, kind, cert_serial: cert_serial_of_plan })
 }
 
@@ -797,7 +799,7 @@ pub async fn place_pairing_file(session: &Session, installed_id: &str, kind: &st
         for dir in mkdirs(path) {
             let _ = afc.mkdir(&dir).await;
         }
-        afc.write_file(path, &xml, &mut |_, _| {}).await?;
+        afc.write_file(path, &mut &xml[..], xml.len() as u64, &mut |_, _| {}).await?;
     }
     if let Some(prefs_path) = prefs {
         for dir in mkdirs(&prefs_path) {
@@ -809,17 +811,26 @@ pub async fn place_pairing_file(session: &Session, installed_id: &str, kind: &st
         };
         prefs.insert("isPairingReset".into(), Value::Boolean(false));
         prefs.insert("activePairingProtocol".into(), Value::String("rppairing".into()));
-        afc.write_file(&prefs_path, &crate::pairing::record::plist_xml(&prefs), &mut |_, _| {}).await?;
+        let xml = crate::pairing::record::plist_xml(&prefs);
+        afc.write_file(&prefs_path, &mut &xml[..], xml.len() as u64, &mut |_, _| {}).await?;
     }
     logf!("install: pairing file written into {installed_id}");
     Ok(true)
 }
 
-/// Install signed bytes and remember the app.
-#[allow(clippy::too_many_arguments)]
-pub async fn install_signed(session: &Session, signed: &[u8], entry: Installed,
+/// Where a task's signed IPA is written, to be sent from (one task at a
+/// time): removed once sent, and left over from a stopped server by
+/// `app::prune_files`.
+pub fn signed_path() -> std::path::PathBuf {
+    state::path("signed.ipa")
+}
+
+/// Installs the signed IPA, removes it, and remembers the app.
+pub async fn install_signed(session: &Session, signed: &std::path::Path, entry: Installed,
                             status: &(dyn Fn(&str, u32) + Send + Sync)) -> Result<(), String> {
-    services::install(session, signed, &mut |stage, pct| status(stage, pct)).await?;
+    let sent = services::install(session, signed, &mut |stage, pct| status(stage, pct)).await;
+    let _ = std::fs::remove_file(signed);
+    sent?;
     let mut list = installed();
     list.retain(|i| i.bundle_id != entry.bundle_id);
     list.push(Installed { installed_at: now(), ..entry });

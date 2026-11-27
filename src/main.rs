@@ -401,6 +401,9 @@ fn supervise() -> ExitCode {
                 crashes.retain(|t| now.duration_since(*t).as_secs() < 60);
                 crashes.push(now);
                 if let Some(status) = status {
+                    // In the log too: "signal: 6 (SIGABRT)" with server.out's
+                    // "memory allocation … failed" is iOS's memory running out.
+                    logf!("supervisor: the server stopped ({status}); starting it again");
                     say(&format!("BariStore stopped ({status}); starting it again."));
                 }
                 // In the background iOS may refuse memory for a while: wait
@@ -464,14 +467,13 @@ async fn dev(args: &[String]) -> Result<(), String> {
             // app/appex gets a dummy profile and minimal entitlements.
             use plist::Value;
             let a = |i: usize| args.get(i).cloned().ok_or("dev sign <in> <out> <cert.der> <key.der> <team>");
-            let bytes = std::fs::read(a(1)?).map_err(|e| e.to_string())?;
             let leaf = std::fs::read(a(3)?).map_err(|e| e.to_string())?;
             let key = {
                 use rsa::pkcs8::DecodePrivateKey;
                 rsa::RsaPrivateKey::from_pkcs8_der(&std::fs::read(a(4)?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?
             };
             let team = a(5)?;
-            let mut ipa = sign::bundle::Ipa::read(bytes, &|_, _| {})?;
+            let mut ipa = sign::bundle::Ipa::read(std::path::Path::new(&a(1)?), &|_, _| {})?;
             let mut plan = sign::bundle::Plan {
                 identity: sign::codesign::Identity { leaf, chain: vec![], key, team: team.clone(), common_name: "Test".into() },
                 bundles: Default::default(), info_edits: Default::default(), add_files: vec![],
@@ -488,7 +490,7 @@ async fn dev(args: &[String]) -> Result<(), String> {
             }
             let started = std::time::Instant::now();
             sign::bundle::sign(&mut ipa, &plan, &mut |n, t| println!("signed {n}/{t}"))?;
-            std::fs::write(a(2)?, ipa.write()?).map_err(|e| e.to_string())?;
+            ipa.write(std::path::Path::new(&a(2)?))?;
             println!("ok in {:?}", started.elapsed());
             Ok(())
         }

@@ -42,6 +42,9 @@ pub enum LoginError {
     IdentityRefused(String),
     /// Apple's front end answered HTTP 503: it refuses the client claimed.
     ServiceRefused(String),
+    /// Apple asked for a text-message code and refused to send one (a bare
+    /// 403, or its own words): another client may get one.
+    NoCode(String),
     /// Retrying cannot help now (429, locked account).
     Stop(String),
     Cancelled,
@@ -57,6 +60,10 @@ impl std::fmt::Display for LoginError {
             LoginError::Stop(why) => write!(f, "{why}"),
             LoginError::ServiceRefused(why) => write!(f, "Apple's sign-in server refused every client BariStore can claim to be ({why}). Try again later or update BariStore"),
             LoginError::IdentityRefused(why) => write!(f, "Apple refused the sign-in identity ({why})"),
+            LoginError::NoCode(why) => write!(f,
+                "Apple asked for a code by text message but did not send one ({why}), whichever client BariStore \
+                 signed in as. Wait a while and try again, or sign in with this Apple ID on an iPhone, iPad or Mac \
+                 once: Apple then shows the code there"),
             LoginError::Cancelled => write!(f, "sign-in cancelled"),
             LoginError::Other(why) => write!(f, "{why}"),
         }
@@ -98,7 +105,8 @@ fn check(response: &Dictionary) -> Result<(), LoginError> {
     logf!("gsa: Apple answered {what}");
     Err(match code {
         -20101 | -20970 | -22406 => LoginError::WrongPassword(what),
-        -80045 | -80046 | -23782 => LoginError::IdentityRefused(what),
+        // -22410: an identity provisioned under another client info (iloader #1304).
+        -80045 | -80046 | -23782 | -22410 => LoginError::IdentityRefused(what),
         -20209 => LoginError::Stop(format!("Apple locked this Apple Account for security reasons ({what}); \
                                              unlock it at iforgot.apple.com")),
         _ => LoginError::Other(format!("Apple error {what}")),
@@ -437,17 +445,62 @@ async fn trusted_device(gs: &GrandSlam, spd: &Dictionary, sent: bool, ask: &Code
     Err(other("too many wrong codes"))
 }
 
+/// The id of the number to text in Apple's `trustedPhoneNumbers` (GET /auth,
+/// or a 412's body): the first that takes text messages.
+fn phone_id(reply: &serde_json::Value) -> Option<u64> {
+    let numbers = reply.get("trustedPhoneNumbers")?.as_array()?;
+    numbers.iter().find(|n| n.get("pushMode").and_then(|m| m.as_str()) == Some("sms")).or(numbers.first())?
+        .get("id")?.as_u64()
+}
+
+/// Apple's first `serviceErrors` entry of a JSON answer: its code and words.
+fn service_error(reply: &serde_json::Value) -> Option<(String, String)> {
+    let e = reply.get("serviceErrors")?.as_array()?.first()?;
+    let text = |k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let words: Vec<String> = [text("title"), text("message")].into_iter().filter(|t| !t.is_empty()).collect();
+    Some((text("code"), words.join(": ")))
+}
+
+/// The text-message code, sent when asked for (PUT /auth/verify/phone).
+/// Apple refusing to send it (a bare 403 since October 2026 for the old
+/// Mac's client info, or e.g. -28248 "codes can't be sent to this phone
+/// number") is NoCode: no code will come, so the user is not asked for one.
+/// A 412 names the number Apple has when ours is not it (its id is not
+/// always 1, xtool #424), else a code is on its way; -22979/-22981 (codes
+/// sent recently) leave the last one valid.
 async fn sms(gs: &GrandSlam, spd: &Dictionary, ask: &CodeAsker) -> Result<(), LoginError> {
-    let numbers: serde_json::Value = gs.http.get("https://gsa.apple.com/auth")
-        .headers(second_factor_headers(gs, spd, true).await?).send().await.map_err(other)?
-        .json().await.unwrap_or(serde_json::Value::Null);
-    let id = numbers.pointer("/trustedPhoneNumbers/0/id").and_then(|v| v.as_u64()).unwrap_or(1);
-    let body = serde_json::json!({"phoneNumber": {"id": id}, "mode": "sms"});
-    let status = gs.http.put("https://gsa.apple.com/auth/verify/phone")
-        .headers(second_factor_headers(gs, spd, true).await?).json(&body).send().await.map_err(other)?.status();
-    // A refusal here (e.g. -22979: a code was sent recently) still leaves the
-    // last code valid, so the user is asked either way.
-    logf!("gsa: text-message code requested ({status})");
+    let numbers = gs.http.get("https://gsa.apple.com/auth")
+        .headers(second_factor_headers(gs, spd, true).await?).send().await.map_err(other)?;
+    let listed = numbers.status();
+    let mut id = phone_id(&numbers.json().await.unwrap_or_default()).unwrap_or(1);
+    logf!("gsa: trusted phone numbers asked ({listed}); texting number {id}");
+    for retried in [false, true] {
+        let body = serde_json::json!({"phoneNumber": {"id": id}, "mode": "sms"});
+        let resp = gs.http.put("https://gsa.apple.com/auth/verify/phone")
+            .headers(second_factor_headers(gs, spd, true).await?).json(&body).send().await.map_err(other)?;
+        let status = resp.status();
+        let reply: serde_json::Value = resp.json().await.unwrap_or_default();
+        let error = service_error(&reply);
+        logf!("gsa: text-message code requested ({status}){}",
+              error.as_ref().map(|(code, words)| format!(": {code} {words}")).unwrap_or_default());
+        if status.is_success() {
+            break;
+        }
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            match phone_id(&reply) {
+                Some(theirs) if theirs != id && !retried => {
+                    id = theirs;
+                    continue;
+                }
+                _ => break,
+            }
+        }
+        match error {
+            Some((code, _)) if code == "-22979" || code == "-22981" => break,
+            Some((code, words)) => return Err(LoginError::NoCode(format!("{code} {words}"))),
+            None => return Err(LoginError::NoCode(format!("HTTP {status}"))),
+        }
+    }
     let mut hint = None;
     for _ in 0..5 {
         let code = ask(CodeKind::Sms, hint.take()).await.ok_or(LoginError::Cancelled)?;
@@ -457,7 +510,10 @@ async fn sms(gs: &GrandSlam, spd: &Dictionary, ask: &CodeAsker) -> Result<(), Lo
         if resp.status().is_success() {
             return Ok(());
         }
-        hint = Some("That code was wrong. Try again.".into());
+        match service_error(&resp.json().await.unwrap_or_default()) {
+            Some((code, words)) if code != "-21669" => return Err(other(format!("Apple refused the code: {code} {words}"))),
+            _ => hint = Some("That code was wrong. Try again.".into()),
+        }
     }
     Err(other("too many wrong codes"))
 }
@@ -547,10 +603,12 @@ impl Route {
 
 /// Signs in through every server and claim in turn until one works.
 ///
-/// * HTTP 503 from Apple, or -80045/-80046/-23782: Apple refused that client
-///   or identity before looking at the password; the next claim or server
-///   is tried. A claim refused with 503 on two servers is skipped after
-///   that (SideInstaller's AppleRefusals).
+/// * HTTP 503 from Apple, or -80045/-80046/-23782/-22410: Apple refused that
+///   client or identity before looking at the password; the next claim or
+///   server is tried. A claim refused with 503 on two servers is skipped
+///   after that (SideInstaller's AppleRefusals).
+/// * No text message (NoCode): the other claim is tried; that claim is not
+///   tried again on other servers (Apple decides it by the client).
 /// * -20101/-20970/-22406 (credentials) stop at once: more attempts with
 ///   the same password risk a lock.
 /// * 429 and a locked account stop at once.
@@ -559,7 +617,7 @@ pub async fn login(email: &str, password: &str, ask: &CodeAsker, status: &(dyn F
 {
     let email = email.trim().to_lowercase();
     let mut last = LoginError::Other("no anisette server answered".into());
-    let mut refused: Vec<Claim> = Vec::new();
+    let (mut refused, mut no_code): (Vec<Claim>, Vec<Claim>) = (Vec::new(), Vec::new());
     let mut attempts = 0;
     let saved = Route::saved();
     for server in candidate_servers().await {
@@ -578,7 +636,7 @@ pub async fn login(email: &str, password: &str, ask: &CodeAsker, status: &(dyn F
             claims.insert(0, r.claim);
         }
         for claim in claims {
-            if refused.iter().filter(|c| **c == claim).count() >= 2 {
+            if refused.iter().filter(|c| **c == claim).count() >= 2 || no_code.contains(&claim) {
                 continue;
             }
             let gs = match GrandSlam::connect(&server, &advertised, claim).await {
@@ -602,6 +660,11 @@ pub async fn login(email: &str, password: &str, ask: &CodeAsker, status: &(dyn F
                     logf!("gsa: {host} as {}: {why}", claim.name());
                     refused.push(claim);
                     last = LoginError::ServiceRefused(why);
+                }
+                Err(LoginError::NoCode(why)) => {
+                    logf!("gsa: {host} as {}: Apple sent no text message ({why})", claim.name());
+                    no_code.push(claim);
+                    last = LoginError::NoCode(why);
                 }
                 Err(LoginError::IdentityRefused(why)) => {
                     logf!("gsa: {host} as {}: identity refused ({why})", claim.name());
@@ -687,5 +750,27 @@ pub async fn probe(server: &str, claim: Claim) -> String {
         Err(LoginError::ServiceRefused(why)) => format!("Apple refuses it ({why})"),
         Err(e) => format!("{e:?}"),
         Ok(_) => "signed in?".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The number to text and Apple's own words, from the JSON answers of
+    /// /auth and /auth/verify/phone (bodies as xtool #424 and iloader #814
+    /// show them).
+    #[test]
+    fn text_message_answers() {
+        let listed = serde_json::json!({"trustedPhoneNumbers": [
+            {"id": 3, "pushMode": "voice"}, {"id": 2, "pushMode": "sms", "nonFTEU": true}]});
+        assert_eq!(phone_id(&listed), Some(2));
+        assert_eq!(phone_id(&serde_json::json!({"trustedPhoneNumbers": [{"id": 4}]})), Some(4));
+        assert_eq!(phone_id(&serde_json::Value::Null), None);
+        let refused = serde_json::json!({"serviceErrors": [{"code": "-28248", "title": "Verification Failed",
+            "message": "Verification codes can't be sent to this phone number at this time."}]});
+        assert_eq!(service_error(&refused), Some(("-28248".into(),
+            "Verification Failed: Verification codes can't be sent to this phone number at this time.".into())));
+        assert_eq!(service_error(&serde_json::Value::Null), None);
     }
 }
