@@ -9,6 +9,11 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 <a href="#install">Install</a> ·
 <a href="https://github.com/barismd/BariStore/releases/latest">Latest release</a></p>
 
+> [!IMPORTANT]
+> **Apple has removed Open Minis from the App Store.** BariStore runs inside Open Minis, so it cannot be set up on
+> a new device for now. Where Open Minis is already installed, BariStore keeps working. BariStore is moving to a new
+> app store app as soon as possible: watch this page and the [website](https://barismd.github.io/BariStore/) for news.
+
 <p align="center">
 <img src="docs/screens/featured.jpg" width="200" alt="Featured">&nbsp;
 <img src="docs/screens/app.jpg" width="200" alt="An app">&nbsp;

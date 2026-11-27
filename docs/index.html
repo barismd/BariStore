@@ -58,6 +58,15 @@ section { padding: 56px 0 0; }
 .phone img { display: block; width: 100%; height: auto; }
 .phone.second { transform: translateY(36px); }
 
+/* Notice */
+.notice { background: #FFF4D6; color: #3D2E00; border-bottom: 1px solid #F0D98A; font-size: 15px; line-height: 1.5;
+  padding: calc(12px + env(safe-area-inset-top)) 0 12px; }
+.notice b { display: block; font-size: 16px; }
+.notice + .hero { padding-top: 28px; }
+@media (prefers-color-scheme: dark) {
+  .notice { background: #3A2F0B; color: #FFE9A8; border-bottom-color: #5C4A12; }
+}
+
 /* Features */
 .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 24px; }
 .card { background: var(--card); border-radius: 18px; padding: 20px; box-shadow: var(--shadow); }
@@ -118,6 +127,15 @@ footer { margin-top: 72px; padding: 28px 0 calc(36px + env(safe-area-inset-botto
 </style>
 </head>
 <body>
+
+<div class="notice" role="note">
+  <div class="wrap">
+    <b>Apple has removed Open Minis from the App Store.</b>
+    BariStore runs inside Open Minis, so it cannot be set up on a new device for now. Where Open Minis is already
+    installed, BariStore keeps working. BariStore is moving to a new app store app as soon as possible: watch this page
+    and <a href="https://github.com/barismd/BariStore">GitHub</a> for news.
+  </div>
+</div>
 
 <header class="hero">
   <div class="wrap">
