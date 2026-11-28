@@ -1,0 +1,65 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main, test]
+    paths: ["src/**", "ui/**", "assets/**", "Cargo.toml", "Cargo.lock", "scripts/**", ".cargo/**", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One build of a branch at a time: a second one waits, as both would
+# replace the same release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # A test that hangs ends the run instead of holding it for hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-wasip1
+      - name: Tests
+        run: cargo test --locked
+      # The same tests as WebAssembly, run by rootshell's own worker
+      # (scripts/rootshell.mjs). Those that start other programs (openssl) or
+      # threads, which a WebAssembly program cannot, run above only.
+      - name: Tests in rootshell's runtime
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: node scripts/rootshell.mjs
+        run: |
+          cargo test --locked --target wasm32-wasip1 -- --test-threads=1 \
+            --skip openssl --skip csr_verifies --skip opens_ours --skip usable_p12 --skip signature_in_one_pass \
+            --skip redirects_chunks --skip a_lost_connection --skip shares_a_file --skip udp_probes --skip signs_and_packs
+      - name: Build baristore.wasm
+        run: cargo build --release --locked --target wasm32-wasip1
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp target/wasm32-wasip1/release/baristore.wasm baristore.wasm
+          sha256sum baristore.wasm > baristore.wasm.sha256
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          notes="Built by CI from ${GITHUB_SHA} on $(date -u +%Y-%m-%d), for rootshell. Install: https://barismd.github.io/BariStore/"
+          # v<version>: one release per version. A stable one becomes the
+          # latest release; alpha/beta/rc are prereleases, and the only kind
+          # the test branch publishes. A version built again replaces its
+          # release, so its tag, notes and files all belong to this build;
+          # the files go up with the release (gh publishes it once they are).
+          kind="--latest"; case "$version" in *-*) kind="--prerelease";; esac
+          if [ "$GITHUB_REF_NAME" != main ] && [ "$kind" = --latest ]; then
+            echo "Only main publishes a stable release; $version is not published from $GITHUB_REF_NAME."
+            exit 0
+          fi
+          if gh release view "v$version" >/dev/null 2>&1; then
+            gh release delete "v$version" --cleanup-tag --yes
+          fi
+          gh release create "v$version" $kind --title "BariStore $version" --notes "$notes" --target "${GITHUB_SHA}" \
+            baristore.wasm baristore.wasm.sha256

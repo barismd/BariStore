@@ -1,0 +1,5 @@
+# rootshell runs WASI Preview 1 programs: `cargo build --release --target
+# wasm32-wasip1` makes baristore.wasm. A stack of 8 MiB (wasm-ld's default
+# is 1 MiB): signing, plists and pictures nest deeply.
+[target.wasm32-wasip1]
+rustflags = ["-C", "link-arg=-zstack-size=8388608"]
