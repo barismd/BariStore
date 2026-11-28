@@ -3,10 +3,10 @@
 ## Goal
 
 An app store for iPhone/iPad that runs in **rootshell** (kitknox/rootshell,
-App Store, 1.0.16-177+; 178+ for the Shortcut), one device, no computer. The
-**BariStore** Shortcut shows the store page over rootshell (rootshell's
-BariStore profile runs `baristore page`); without it, `baristore` (a function `baristore install` puts in
-~/.rootshellrc) opens it in Safari. Installed with one line,
+App Store, 1.0.16-177+; 178+ for the Shortcut), one device, no computer.
+`baristore` (a function `baristore install` puts in ~/.rootshellrc; the
+install line runs it) opens the store page in Safari by itself; an optional
+**BariStore** Shortcut shows it over rootshell instead. Installed with one line,
 `sh -c "$(curl -fsSL https://raw.githubusercontent.com/barismd/BariStore/test/docs/install.sh)"`
 while it is a test build (the website's address,
 https://barismd.github.io/BariStore/install.sh, once 1.2.0 is released on
@@ -65,8 +65,9 @@ applied nor shown for it (owner, 1.1.1).
   README, site and the setup page start with Before you install / Before
   you start: every setting with its exact place (Developer Mode; LocalDevVPN
   Connect; rootshell › Settings › General › Location Diary Mode, Mode Auto
-  During Active Sessions, and Terminal Notifications; Local Network
-  access), and the extra steps; the install command prints the same.
+  During Active Sessions, and Terminal Notifications; rootshell › Settings ›
+  Terminal › Open Links from Programs; Local Network access), and the extra
+  steps; the install command prints the same.
   rootshell may show a Live Activity (its General › Live Activity) while
   BariStore runs: said to be rootshell's own. rootshell runs WASI
   Preview 1 programs in a hidden web view and lends them sockets and TLS; it
@@ -74,32 +75,52 @@ applied nor shown for it (owner, 1.1.1).
   raw mDNS (`src/mdns.rs`; device-proven by siboot's rootshell pairing). Before:
   Open Minis (1.x), which published the service with `minis-bonjour`; a-Shell
   could not (no NSBonjourServices entry, no multicast entitlement).
-- The page shows over rootshell (owner, 2026-11-28: "Rootshell üzerinde
-  çalışsın"), as atelier-install 0.4.0 does it: rootshell has no browser
-  for a local page (its page tab opens only from an SSH connection's
-  listening ports; OSC links and OpenURL go to Safari), but a Shortcut's
-  Show Web Page shows one over the app in front. Owner, 2026-11-28: no
-  random numbers for people to type; a rootshell profile the Shortcut runs;
-  adding it to the Home Screen optional; tabs must not pile up. So: a Local
-  Shell profile "BariStore" with the Startup Command `baristore page`, and a
-  Shortcut of three actions (Open Connection Profile: BariStore, Wait 3 s,
-  Show Web Page http://127.0.0.1:46510/; the page's Options › BariStore
-  Shortcut and the README say how). `page` arms the store (web.rs `arm`):
-  the first request for the bare address within a minute is sent on to a
-  key made for it. rootshell stays in front while the page is up. Tabs:
-  rootshell opens a new one for every run of a profile (or Open Local
-  Shell) and has no way to reuse one or for a program to close its own
-  (read 2026-11-28: `createLocalProfile` always opens a tab; `exec` is no
-  command of its local shell; a script's `exit` ends only the script), so a
-  run while BariStore already runs leaves one finished tab that says it can
-  be closed. Only rootshell can change that (an option to focus a profile's
-  open tab). Safari stays as the way without it (opened by itself until a
-  Shortcut was used once). One install line for testing too (owner: "tek
-  curl | sh linki"): rootshell's `sh` runs no script piped to it, so the
-  line is `sh -c "$(curl …)"` (docs/install.sh; owner's device, 2026-11-28:
-  the script ran). siboot-pair's own was three lines (curl -O, `ifconfig
-  en0 > ifconfig.txt`, `./siboot-pair.wasm`), since rootshell ran no .wasm
-  after `&&`.
+- The page opens in Safari, by itself (owner, 2026-11-28, later: "UI'yi
+  açmak için aşırı zahmete giriyoruz ... insanlar böyle bir zahmete
+  girmemeli", pointing at siboot and NexSideloader, which "opened the
+  interface directly"). Read on 2026-11-28: their page was Open Minis's own
+  browser (`minis-open`, a sheet over Minis's terminal); their rootshell
+  part, siboot-pair, had no page, only terminal lines and the code in large
+  digits. rootshell shows no program's page inside itself (1.0.17-183):
+  OSC 1337 `OpenURL` and a link's Open Link go to `UIApplication.open`
+  (Safari); its in-app web tab (`PortPreviewTabView`) opens only ports of an
+  SSH/mosh host ("Local shells are not remote hosts", TerminalView+
+  RemotePorts.swift); its only other web view is a Shortcut's Show Web Page
+  over it. So `baristore` (and the install line) prints the address as an
+  OSC 8 link and sends OpenURL: Safari opens with rootshell › Settings ›
+  Terminal › Open Links from Programs on (off by default), else a touch and
+  hold on the address › Open Link. Location Diary Mode keeps the store
+  running behind Safari. A typed `baristore` while the store runs in
+  another tab opens Safari at its page too.
+- The BariStore Shortcut is optional (Options › BariStore Shortcut, README,
+  site; not on the setup page): one tap (Home Screen too) starts BariStore
+  and shows the store over rootshell, which stays in front, as
+  atelier-install 0.4.0 does it (owner, earlier on 2026-11-28: "Rootshell
+  üzerinde çalışsın"; no random numbers to type; Home Screen optional).
+  Three actions, no rootshell profile any more: Open Local Shell (Command
+  `baristore page`; the same `pendingStartupCommand` path as a profile's
+  Startup Command), Wait 3 s, Show Web Page http://127.0.0.1:46510/. `page`
+  arms the store (web.rs `arm`): the first request for the bare address
+  within a minute is sent on to a key made for it. Tabs: rootshell opens a
+  new one for every run of Open Local Shell (or a profile) and has no way to
+  reuse one or for a program to close its own (read 2026-11-28:
+  `createLocalProfile` always opens a tab; `exec` is no command of its
+  local shell; a script's `exit` ends only the script), so a run while
+  BariStore already runs leaves one finished tab that says it can be
+  closed. Only rootshell can change that (an option to focus a profile's
+  open tab). Not done, for now: rootshell reads ~/rootshell.conf
+  (`open-links-from-programs`, `location-diary-auto-mode`,
+  `terminal-notification-enabled` keys), but on iOS only at launch, on
+  coming to the front, or with the `reloadconfig` command (which a script
+  cannot run), so settings written by the installer would apply only after
+  rootshell left the front once; it would also pin them to this device.
+- One install line for testing too (owner: "tek curl | sh linki"):
+  rootshell's `sh` runs no script piped to it (a bare `sh`, or `sh` with
+  only flags, does nothing; LocalShellSession+Input.swift), so the line is
+  `sh -c "$(curl …)"` (docs/install.sh; owner's device, 2026-11-28: the
+  script ran); only its address gets shorter, at 1.2.0 on main. siboot-pair's
+  own was three lines (curl -O, `ifconfig en0 > ifconfig.txt`,
+  `./siboot-pair.wasm`), since rootshell ran no .wasm after `&&`.
 - Store spec: Featured (search, category chips, a two-column grid of short
   tiles: icon, name, two lines of text, GET; Add IPA, Sources with "add" on
   top; owner, 1.1.0: no screenshots in tiles (they loaded slowly; short
@@ -206,10 +227,10 @@ applied nor shown for it (owner, 1.1.1).
   512 KB past 2 MB (it only ever grew).
 - rootshell keeps a program running in the background only with its Location
   Diary Mode on (Settings, Auto During Active Sessions counts a WASM program
-  from 1.0.16-177; without it ~25 s, `BackgroundExecutionCoordinator`): with
-  the Shortcut, rootshell is in front while the page is up and in the
-  background only in Settings or another app; in Safari, always while it is
-  used. Setup and pairing say so; there is no keep-alive of BariStore's own
+  from 1.0.16-177; without it ~25 s, `BackgroundExecutionCoordinator`): in
+  Safari, always while the page is used; with the Shortcut, rootshell is in
+  front while the page is up and in the background only in Settings or
+  another app. Setup and pairing say so; there is no keep-alive of BariStore's own
   (Minis's silent speech is gone).
 - Versions: 1.0.0 is the first stable release (history squashed). CI builds
   every push to `main` (and `test`) that touches the code into
@@ -223,7 +244,7 @@ applied nor shown for it (owner, 1.1.1).
   (owner, 1.1.1 was published again: "the old one must not stay").
 - Website: `docs/` on GitHub Pages (main, /docs):
   https://barismd.github.io/BariStore/, with the one install line, the
-  Shortcut's steps and the screenshots README shows. Until 1.2.0 is released
+  optional Shortcut's steps and the screenshots README shows. Until 1.2.0 is released
   on main, the site there is Open Minis's and every install line (README,
   site, the script's comment) is the `test` branch's raw address.
   `docs/install.sh` downloads the newest release's baristore.wasm (the
@@ -300,8 +321,8 @@ applied nor shown for it (owner, 1.1.1).
   the page is opened with OSC 1337 `OpenURL` (http(s) only, Settings ›
   Terminal › Open Links from Programs, rootshell in front) and printed as an
   OSC 8 link. Untested on device.
-- The page is in the Shortcut's web view (Show Web Page; it closes when
-  rootshell goes to the background, and ✕ closes it) or in Safari: their
+- The page is in Safari or in the Shortcut's web view (Show Web Page; it
+  closes when rootshell goes to the background, and ✕ closes it): their
   own dialogs and share sheet; app URLs (livecontainer://) cannot be opened
   by a WebAssembly program, so a task asks the page (question kind "open": a
   link the user taps, iOS asks before opening the app). The store serves
@@ -345,7 +366,7 @@ applied nor shown for it (owner, 1.1.1).
   would hold the program. Untested on device.
 - The "Pair with …" entry asks for the passcode, then sends pair-setup M1.
   The code is chosen as pairing starts and shown on the page at once (the
-  Shortcut's page closes as the user goes to Settings; atelier-install
+  user leaves the page for Settings; atelier-install
   chooses its code ahead the same way), and notified at M1 (owner: an
   earlier notification is gone by then); a wrong code gets a new one.
 - rootshell's `ifconfig` leaves out the line break after each `hwassist=…<…>`
@@ -608,6 +629,15 @@ start open, then one line once pairing starts, Show/Hide; the code sheet's
 other ways; the profile and Shortcut steps). Untested anywhere but a
 device: the profile and Shortcut, install.sh in rootshell's interpreter,
 the function in rootshell.
+Linux-verified for 1.2.0-alpha.2: the unit tests natively (77) and in
+rootshell's worker (63); in that worker, `baristore install`'s checklist
+with Open Links from Programs, `baristore` printing the address and
+sending OpenURL (also with 46510 taken: another port), a typed `--join`
+while the store runs opening the same address, `--join page` arming it;
+the page in Playwright (Before you start with Open Links from Programs, no
+Shortcut link on the setup page, the Shortcut sheet with Open Local Shell).
+Untested on a device: Safari opened by OpenURL, Open Link, the store
+behind Safari, the Shortcut with Open Local Shell.
 
 Linux-verified for the first rootshell build: the unit tests natively (75)
 and as WebAssembly through rootshell's own worker (`scripts/rootshell.mjs`,

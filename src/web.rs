@@ -2,12 +2,13 @@
 //! (other apps and websites on the device can reach a loopback port, but
 //! not guess the path), Host checked against the loopback (no DNS
 //! rebinding; rootshell's listener takes connections on every address the
-//! device has, so this also keeps the network out). The page shows over
-//! rootshell in the BariStore Shortcut's web view, or in Safari under the
-//! store's own key. The Shortcut opens http://127.0.0.1:46510/ without a
-//! key, after rootshell's BariStore profile ran `baristore page`: that arms
-//! the store (`arm`), and the first request for the bare address within a
-//! minute is sent on to a key made for it, kept with the Shortcut's keys.
+//! device has, so this also keeps the network out). The page opens in
+//! Safari under the store's own key, or, with the optional BariStore
+//! Shortcut, over rootshell in the Shortcut's web view. The Shortcut opens
+//! http://127.0.0.1:46510/ without a key, after its Open Local Shell ran
+//! `baristore page`: that arms the store (`arm`), and the first request for
+//! the bare address within a minute is sent on to a key made for it, kept
+//! with the Shortcut's keys.
 //! Another app on the device would have to ask in that minute, before the
 //! Shortcut does (the user sees the page fail then). A file handed to
 //! another app (Install to LiveContainer) has an address of its own, see
@@ -90,13 +91,6 @@ fn add_shortcut_key(key: &str) {
     if let Err(e) = crate::state::write_private(&crate::state::path("page-keys"), text.as_bytes()) {
         logf!("web: the Shortcut's key not kept: {e}");
     }
-}
-
-/// Whether the Shortcut ever opened the page (then the store does not open
-/// Safari by itself). From the file: a run handing over to the store in
-/// another tab has no keys of its own.
-pub fn shortcut_known() -> bool {
-    std::fs::read_to_string(crate::state::path("page-keys")).is_ok_and(|t| t.lines().any(|l| valid_key(l.trim())))
 }
 
 /// Under which key a request came: Some(true) for one of the Shortcut's.

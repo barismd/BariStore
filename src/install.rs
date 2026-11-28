@@ -803,7 +803,7 @@ pub async fn place_pairing_file(session: &Session, installed_id: &str, kind: &st
 /// startup file, ~/.rootshellrc (sourced in every new tab; the functions it
 /// defines stay in the tab's shell). One line, so that rootshell's
 /// line-by-line fallback reads it too. A store may be running in another
-/// tab (the BariStore Shortcut opens a new tab each run): rootshell then
+/// tab (each run of the BariStore Shortcut opens a new one): rootshell then
 /// holds this tab's mkdir and ifconfig until that one ends, so only the
 /// shell's own `[` and `cd` come before `baristore.wasm --join`, which
 /// hands the request to it (main.rs). Otherwise it saves `ifconfig`'s
@@ -847,9 +847,9 @@ pub async fn set_up_command() {
             - LocalDevVPN connected, on Wi-Fi\n\
             - rootshell › Settings › General: Location Diary Mode on (Mode: Auto During Active Sessions) and \
             Terminal Notifications on\n\
-            - allow rootshell's Local Network access when iOS asks\n\
-            To show the store over rootshell, add the BariStore profile and Shortcut: the store's Options › \
-            BariStore Shortcut says how."),
+            - rootshell › Settings › Terminal: Open Links from Programs on (the store then opens in Safari by \
+            itself)\n\
+            - allow rootshell's Local Network access when iOS asks"),
         Err(e) => crate::rootshell::osc::say(&format!("Could not set up the baristore command ({e}): type \
                                                        baristore.wasm instead.")),
     }

@@ -1,12 +1,13 @@
 //! One pairing run in rootshell: announce the pairable host over mDNS
 //! (`crate::mdns`) and wait for Settings to connect. The code is chosen as
-//! the run starts and shown on the page at once, since the page closes as
-//! the user goes to Settings (the Shortcut's web view goes with rootshell
-//! into the background; atelier-install shows its code before Settings
-//! the same way); once the device asks for it (after "Pair with BariStore"
-//! and the passcode) it also goes out as a notification, which the user
-//! sees over Settings (rootshell posts it in the background too, with its
-//! Terminal Notifications on). Up to three tries, each with a new code.
+//! the run starts and shown on the page at once, since the user leaves the
+//! page for Settings (Safari stays behind; the Shortcut's web view closes
+//! as rootshell goes to the background; atelier-install shows its code
+//! before Settings the same way); once the device asks for it (after "Pair
+//! with BariStore" and the passcode) it also goes out as a notification,
+//! which the user sees over Settings (rootshell posts it in the background
+//! too, with its Terminal Notifications on). Up to three tries, each with a
+//! new code.
 //! rootshell keeps running in the background while its Location Diary Mode
 //! is on.
 
@@ -110,7 +111,7 @@ pub async fn run(events: mpsc::UnboundedSender<Event>) -> Result<PairingRecord, 
                     .map_err(|e| format!("paired, but the record could not be saved: {e}"))?;
                 logf!("pair: paired with {} ({})", record.peer.name, record.peer.model);
                 let _ = events.send(Event::Paired { name: record.peer.name.clone() });
-                osc::notify("Paired", "BariStore continues: open it again (its Shortcut, or Safari).");
+                osc::notify("Paired", "BariStore continues: go back to Safari (or run the BariStore Shortcut).");
                 drop(advert);
                 return Ok(record);
             }

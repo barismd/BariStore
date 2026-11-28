@@ -347,7 +347,8 @@ function beforeYouStart(started) {
   return `<div class="card pad">${head}<ol class="how small">
     <li><b>Developer Mode</b> on: Settings › Privacy & Security › Developer Mode › On, then Restart and confirm. Not listed there? It appears when you start pairing (step 2): turn it on then.</li>
     <li><b>LocalDevVPN</b> (App Store): on Wi-Fi, open it and tap Connect.</li>
-    <li>In <b>rootshell › Settings › General</b>: <b>Location Diary Mode</b> on, Mode <b>Auto During Active Sessions</b> (allow location when asked), so BariStore keeps running while you are in Settings or another app; <b>Terminal Notifications</b> on (allow notifications when asked), for the pairing code.</li>
+    <li>In <b>rootshell › Settings › General</b>: <b>Location Diary Mode</b> on, Mode <b>Auto During Active Sessions</b> (allow location when asked), so BariStore keeps running while you are in Safari, Settings or another app; <b>Terminal Notifications</b> on (allow notifications when asked), for the pairing code.</li>
+    <li>In <b>rootshell › Settings › Terminal</b>: <b>Open Links from Programs</b> on, so that <b>baristore</b> opens this page in Safari by itself.</li>
     <li><b>Local Network</b>: when rootshell asks to find devices on your local network, tap Allow (pairing needs it). Turned down? Settings › Privacy & Security › Local Network › rootshell on.</li>
     </ol><p class="muted small" style="margin:0">While BariStore runs, rootshell may show a Live Activity on the Lock Screen and in the Dynamic Island: that is rootshell's.</p></div>`;
 }
@@ -383,7 +384,6 @@ function setupView() {
       ${li(4, "Done", `<button class="btn" onclick="act('settings',{settings:{setup_done:true}})">Open the store</button>`)}
     </ol></div>
     ${paired ? `<div class="small muted" style="text-align:center">Paired with ${esc(st.device_name || "this device")}</div>` : ""}
-    ${overRootshell ? "" : `<button class="link" style="text-align:center" onclick="openSheet({kind:'shortcut'})">Show BariStore over rootshell, not in Safari</button>`}
     <button class="link bad" style="text-align:center" onclick="ask({title:'Start again?', message:'BariStore forgets the pairing, the Apple ID session and its settings, and setup starts from the beginning. Apps stay on the device.', ok:'Start again', danger:true, run:reset})">Start again</button>
   </div>`;
 }
@@ -1217,14 +1217,16 @@ async function showLog(checks) {
   const r = await act(checks ? "checks" : "log");
   if (sheet?.kind === "log") { sheet.text = r.message; renderSheet(); }
 }
-/** How to set up the BariStore profile and Shortcut, which show this page over rootshell (rootshell 1.0.16-178 or newer). */
+/** The optional BariStore Shortcut (rootshell 1.0.16-178 or newer, for Open Local Shell's Command): one tap starts BariStore and shows this page over rootshell. */
 function shortcutSheet() {
   const port = S?.page_port || 46510;
-  return { title: "BariStore over rootshell",
-    body: `<p class="muted small">${overRootshell ? "This page is shown by the BariStore Shortcut." : "With the BariStore Shortcut, the store shows over rootshell instead of Safari, and rootshell stays in front while you use it."} Once:</p>
+  return { title: "BariStore Shortcut",
+    body: `<p class="muted small">${overRootshell ? "This page is shown by the BariStore Shortcut." : "Optional. The BariStore Shortcut starts BariStore with one tap (from the Home Screen too) and shows the store over rootshell instead of Safari, with rootshell in front while you use it."} Once, in <b>Shortcuts</b>:</p>
       <ol class="how small">
-        <li>In <b>rootshell › Profiles</b>, tap <b>+</b>, choose <b>Local Shell</b>, name it <b>BariStore</b> and set its <b>Startup Command</b> to <code>baristore page</code>.</li>
-        <li>In <b>Shortcuts</b>, tap <b>+</b>, name it <b>BariStore</b> and add <b>Open Connection Profile</b> (rootshell) with the BariStore profile, <b>Wait</b> 3 seconds, and <b>Show Web Page</b> with <code>http://127.0.0.1:${port}/</code>.</li>
+        <li>Tap <b>+</b> and name the Shortcut <b>BariStore</b>.</li>
+        <li>Add <b>Open Local Shell</b> (rootshell) and set its <b>Command</b> to <code>baristore page</code>.</li>
+        <li>Add <b>Wait</b> with 3 seconds.</li>
+        <li>Add <b>Show Web Page</b> with <code>http://127.0.0.1:${port}/</code>.</li>
         <li>If you like, add it to the Home Screen (the Shortcut's ⓘ › Add to Home Screen).</li></ol>
       <p class="muted small">Going to another app closes the page: BariStore goes on in rootshell (with Location Diary Mode on), and the Shortcut shows it again. rootshell opens a tab for each run; when BariStore already runs, the new tab says so and can be closed.</p>` };
 }

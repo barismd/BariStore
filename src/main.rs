@@ -28,8 +28,8 @@ use rootshell::osc::say;
 #[global_allocator]
 static ALLOCATOR: rootshell::Nudging = rootshell::Nudging;
 
-const USAGE: &str = "usage: baristore            open the store
-       baristore page       open the store over rootshell (rootshell's BariStore profile runs it)
+const USAGE: &str = "usage: baristore            open the store in Safari
+       baristore page       show the store over rootshell (the BariStore Shortcut runs it)
        baristore install    set up the baristore command
        baristore update     install the newest BariStore
        baristore log        print the log (as Options › Log)
@@ -42,9 +42,6 @@ pub const UPDATED: i32 = 75;
 /// The port the BariStore Shortcut opens the page on
 /// (http://127.0.0.1:46510/): the store takes it whenever it is free.
 pub const PAGE_PORT: u16 = 46510;
-
-/// The Shortcut's name, as a link runs it (shortcuts://run-shortcut).
-pub const SHORTCUT: &str = "BariStore";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -199,15 +196,14 @@ async fn hand_over(r: &Running, shortcut: bool) {
     }
 }
 
-/// How to open the page: the Shortcut, over rootshell, or Safari. Safari
-/// opens by itself until the Shortcut was used once.
+/// Opens the page in Safari: rootshell does it with its Settings ›
+/// Terminal › Open Links from Programs on; else the address it shows opens
+/// with a touch and hold.
 fn tell_where(url: &str) {
-    let run = format!("shortcuts://run-shortcut?name={SHORTCUT}");
-    say(&format!("Open the store over rootshell: run the {SHORTCUT} Shortcut ({}).", rootshell::osc::link(&run, "run it")));
-    say(&format!("Or in Safari: {}", rootshell::osc::link(url, url)));
-    if !web::shortcut_known() {
-        rootshell::osc::open_url(url);
-    }
+    say(&format!("The store opens in Safari: {}", rootshell::osc::link(url, url)));
+    say("Nothing opened? Touch and hold the address and tap Open Link (with rootshell's Settings › Terminal › Open \
+         Links from Programs on, it opens by itself).");
+    rootshell::osc::open_url(url);
 }
 
 /// A port no program on the device listens on: the Shortcut's first.
@@ -263,8 +259,8 @@ async fn serve(shortcut: bool) -> Result<(), String> {
         tell_where(&running.url());
     }
     say("Keep this tab open: BariStore runs here. Ctrl-C quits it (Options › Quit too).");
-    say("So that it keeps running while you are in Settings or another app, turn on rootshell's Location Diary Mode \
-         (Settings, Auto During Active Sessions).");
+    say("So that it keeps running while you are in Safari, Settings or another app, turn on rootshell's Location \
+         Diary Mode (Settings › General, Mode Auto During Active Sessions).");
     let store = app::App::new();
     web::serve(store, listener).await;
     Ok(())
