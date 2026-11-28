@@ -11,7 +11,7 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 
 > [!NOTE]
 > **BariStore now runs in [rootshell](https://apps.apple.com/app/id6755794662)**, a terminal app on the App Store,
-> since Apple removed Open Minis from the App Store, and shows its store over rootshell. This is a test build
+> since Apple removed Open Minis from the App Store, and opens its store in Safari. This is a test build
 > (1.2.0-alpha): see [Install](#install).
 
 <p align="center">
@@ -24,7 +24,7 @@ Install, refresh and update sideloaded apps with a free Apple ID, on the device 
 
 - **No computer, no second device.** Pairing, signing and installing all happen on the iPhone or iPad itself.
 - **Developer Mode appears by itself.** If Settings does not list it, BariStore's pairing makes it appear; turn it on there.
-- **Uses none of your 3 app slots.** It runs inside [rootshell](https://apps.apple.com/app/id6755794662), an App Store app, and shows its store over rootshell with the BariStore Shortcut (or in Safari).
+- **Uses none of your 3 app slots.** It runs inside [rootshell](https://apps.apple.com/app/id6755794662), an App Store app, and opens its store in Safari.
 - **Refresh in seconds.** A refresh renews the apps' profiles: nothing is downloaded, signed or uploaded again (apps signed with an older certificate are signed again).
 - **JIT with one tap** for emulators and other JIT apps, right from BariStore.
 - **Sources and updates.** App sources, any IPA from Files (a newer build of one updates it in place), one-tap updates, and per-app beta tracks (Off, nightly, alpha…).
@@ -47,10 +47,11 @@ Once, on the iPhone or iPad (iOS 27 or newer, a free Apple ID is enough):
    your passcode. Not listed there? It appears once BariStore starts pairing (setup's step 2): turn it on then, and
    pair after the restart. BariStore cannot pair or install with it off.
 3. **LocalDevVPN:** on Wi-Fi, open LocalDevVPN and tap **Connect**.
-4. **rootshell › Settings › General:**
-   - **Location Diary Mode** on, **Mode: Auto During Active Sessions**; allow location access when iOS asks.
-     rootshell then keeps BariStore running while you are in Settings or another app.
-   - **Terminal Notifications** on; allow notifications when iOS asks: the pairing code also comes as one.
+4. **rootshell › Settings:**
+   - **General › Location Diary Mode** on, **Mode: Auto During Active Sessions**; allow location access when iOS
+     asks. rootshell then keeps BariStore running while you are in Safari, Settings or another app.
+   - **General › Terminal Notifications** on; allow notifications when iOS asks: the pairing code also comes as one.
+   - **Terminal › Open Links from Programs** on: BariStore then opens its store in Safari by itself.
 5. **Local Network:** when rootshell asks to find devices on your local network, tap **Allow** (pairing needs it).
    Turned it down? Settings › Privacy & Security › Local Network › rootshell on.
 
@@ -65,35 +66,28 @@ Paste this line into a rootshell tab:
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/barismd/BariStore/test/docs/install.sh)"
 ```
 
-It downloads the newest BariStore into rootshell's folder, sets up the `baristore` command and opens the store; run
-it again to update. (rootshell's `sh` runs a script given with `-c`, not one piped to it, so `curl … | sh` does not
-work there.)
+It downloads the newest BariStore into rootshell's folder, sets up the `baristore` command and opens the store in
+Safari; run it again to update. Safari did not open? Touch and hold the address rootshell shows and tap **Open
+Link**. Later, typing `baristore` in rootshell opens the store again. (rootshell's `sh` runs a script given with
+`-c`, not one piped to it, so `curl … | sh` does not work there.)
 
-<a id="shortcut"></a>**Show the store over rootshell**, once:
-
-1. In **rootshell › Profiles**, tap **+**, choose **Local Shell**, name it **BariStore** and set its **Startup
-   Command** to `baristore page`.
-2. In **Shortcuts**, tap **+**, name it **BariStore** and add **Open Connection Profile** (rootshell) with the
-   BariStore profile, **Wait** 3 seconds, and **Show Web Page** with `http://127.0.0.1:46510/`.
-3. Optional: add it to the Home Screen (the Shortcut's ⓘ › Add to Home Screen).
-
-Run the Shortcut: BariStore starts in rootshell and its page shows over rootshell, which stays in front. Without it,
-BariStore opens in Safari (rootshell › Settings › Terminal › **Open Links from Programs** lets it open Safari by
-itself).
+<a id="shortcut"></a>**Optional: one tap from the Home Screen.** The BariStore Shortcut starts BariStore and shows
+its store over rootshell, which stays in front, instead of Safari. In **Shortcuts**, tap **+**, name it **BariStore**
+and add **Open Local Shell** (rootshell) with the Command `baristore page`, **Wait** 3 seconds, and **Show Web Page**
+with `http://127.0.0.1:46510/`; then the Shortcut's ⓘ › **Add to Home Screen**. Going to another app closes its page:
+BariStore goes on in rootshell, and the Shortcut shows it again.
 
 ### Setup
 
 The page walks you through it:
 
 1. **Pair.** Settings › Privacy & Security › Developer Mode shows **Pair with BariStore** at the bottom: tap it,
-   enter your passcode and type the code the page showed (it comes as a notification too). Then run the Shortcut
-   again.
+   enter your passcode and type the code the page showed (it comes as a notification too). Then go back to Safari.
 2. **Sign in** with your Apple ID. A code Apple sends can come to your Apple devices, or by text or call to any of the
    Apple ID's trusted numbers.
 3. **Install** from Featured, or add any IPA.
 
-Going to another app closes the page; BariStore goes on in its rootshell tab, and the Shortcut shows it again.
-rootshell opens a tab for each run of a profile: when BariStore already runs, the new tab says so and can be closed. Typing `baristore` in rootshell starts it too. Updates come through
+BariStore runs in its rootshell tab while you use the store in Safari: keep that tab open. Updates come through
 My Apps › Updates; Options › Log gives a report to share when something goes wrong (`baristore log` prints it in
 another tab).
 

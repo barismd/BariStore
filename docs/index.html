@@ -168,7 +168,7 @@ footer { margin-top: 72px; padding: 28px 0 calc(36px + env(safe-area-inset-botto
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M4.2 7.5l2.6 1.5M17.2 15l2.6 1.5M4.2 16.5l2.6-1.5M17.2 9l2.6-1.5"/><circle cx="12" cy="12" r="3.5"/></svg></div>
         <h3>Developer Mode appears by itself</h3><p>If Settings does not list it, BariStore's pairing makes it appear: turn it on there, and BariStore shows where to tap.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><path d="M17 14v6M14 17h6"/></svg></div>
-        <h3>Uses none of your 3 app slots</h3><p>BariStore runs inside rootshell, an App Store app, so all three free-account slots stay yours. Its store shows over rootshell.</p></div>
+        <h3>Uses none of your 3 app slots</h3><p>BariStore runs inside rootshell, an App Store app, so all three free-account slots stay yours. Its store opens in Safari.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg></div>
         <h3>Refresh in seconds</h3><p>A refresh only renews the apps' profiles: nothing is downloaded, signed or uploaded again.</p></div>
       <div class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
@@ -199,8 +199,10 @@ footer { margin-top: 72px; padding: 28px 0 calc(36px + env(safe-area-inset-botto
             Not listed there? It appears once BariStore starts pairing: turn it on then.</li>
           <li><b>LocalDevVPN:</b> on Wi-Fi, open it and tap Connect.</li>
           <li><b>rootshell › Settings › General:</b> Location Diary Mode on, Mode Auto During Active Sessions (allow
-            location), so BariStore keeps running while you are in Settings; Terminal Notifications on (allow
-            notifications), for the pairing code.</li>
+            location), so BariStore keeps running while you are in Safari or Settings; Terminal Notifications on
+            (allow notifications), for the pairing code.</li>
+          <li><b>rootshell › Settings › Terminal:</b> Open Links from Programs on, so BariStore opens its store in
+            Safari by itself.</li>
           <li><b>Local Network:</b> when rootshell asks to find devices on your local network, tap Allow (Settings ›
             Privacy &amp; Security › Local Network › rootshell, if you turned it down).</li>
         </ul>
@@ -208,15 +210,13 @@ footer { margin-top: 72px; padding: 28px 0 calc(36px + env(safe-area-inset-botto
       <div class="step"><div><h3>Paste one line into a rootshell tab</h3>
         <div class="cmd"><code id="cmd">sh -c "$(curl -fsSL https://raw.githubusercontent.com/barismd/BariStore/test/docs/install.sh)"</code><button class="copy" id="copy" type="button">Copy</button></div>
         <p class="muted" style="margin-top:8px">It downloads the newest BariStore, sets up the <b>baristore</b> command and
-        opens the store. Run it again to update.</p></div></div>
-      <div class="step"><div><h3>Make the BariStore Shortcut</h3>
-        <p class="muted">It shows the store over rootshell, which stays in front. In <b>rootshell › Profiles</b>, add a
-        <b>Local Shell</b> profile named <b>BariStore</b> with the Startup Command <b>baristore page</b>. In
-        <b>Shortcuts</b>, make a <b>BariStore</b> Shortcut: <b>Open Connection Profile</b> (BariStore), <b>Wait</b>
-        3 seconds, <b>Show Web Page</b> <b>http://127.0.0.1:46510/</b>. Adding it to the Home Screen is up to you.
-        Without it, the store opens in Safari.</p></div></div>
+        opens the store in Safari (nothing opened? touch and hold the address rootshell shows, then Open Link). Run it
+        again to update; type <b>baristore</b> in rootshell to open the store later.</p></div></div>
       <div class="step"><div><h3>Follow the setup</h3>
-        <p class="muted">Pair: Settings › Privacy &amp; Security › Developer Mode shows <b>Pair with BariStore</b>; type the code the page showed. Then sign in with your Apple ID. That is all.</p></div></div>
+        <p class="muted">Pair: Settings › Privacy &amp; Security › Developer Mode shows <b>Pair with BariStore</b>; type the code the page showed, then go back to Safari. Then sign in with your Apple ID. That is all.</p>
+        <p class="muted">Optional, one tap from the Home Screen: a <b>BariStore</b> Shortcut with <b>Open Local Shell</b>
+        (rootshell, Command <b>baristore page</b>), <b>Wait</b> 3 seconds and <b>Show Web Page</b>
+        <b>http://127.0.0.1:46510/</b> starts BariStore and shows its store over rootshell instead of Safari.</p></div></div>
     </div>
   </section>
 

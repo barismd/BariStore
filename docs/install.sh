@@ -3,7 +3,7 @@
 #   sh -c "$(curl -fsSL https://raw.githubusercontent.com/barismd/BariStore/test/docs/install.sh)"
 # Puts the newest BariStore in ~/bin/baristore.wasm (the newest release, or the
 # newest test build while no release has one), the baristore command in
-# ~/.rootshellrc, and opens the store. Run it again to update.
+# ~/.rootshellrc, and opens the store in Safari. Run it again to update.
 cd ~ || exit 1
 # rootshell holds this tab's curl and mkdir while BariStore runs in another tab:
 # then only the command is set up.
