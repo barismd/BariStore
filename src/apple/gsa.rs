@@ -61,9 +61,10 @@ impl std::fmt::Display for LoginError {
             LoginError::ServiceRefused(why) => write!(f, "Apple's sign-in server refused every client BariStore can claim to be ({why}). Try again later or update BariStore"),
             LoginError::IdentityRefused(why) => write!(f, "Apple refused the sign-in identity ({why})"),
             LoginError::NoCode(why) => write!(f,
-                "Apple asked for a code by text message but did not send one ({why}), whichever client BariStore \
-                 signed in as. Wait a while and try again, or sign in with this Apple ID on an iPhone, iPad or Mac \
-                 once: Apple then shows the code there"),
+                "Apple asked for a verification code but could not send one ({why}), whichever client BariStore \
+                 signed in as. If this Apple ID has no trusted phone number or Apple device (one made without a \
+                 phone, say), add a phone number at account.apple.com (Sign-In and Security), or sign in with it \
+                 once on an iPhone, iPad or Mac; else wait a while and try again"),
             LoginError::Cancelled => write!(f, "sign-in cancelled"),
             LoginError::Other(why) => write!(f, "{why}"),
         }
@@ -353,13 +354,31 @@ async fn srp_login(gs: &GrandSlam, email: &str, password: &str) -> Result<Stage,
         bare_plist(&raw)
     }).ok_or_else(|| other("cannot decrypt Apple's session data"))?;
     let status = r2.get("Status").and_then(Value::as_dictionary).cloned().unwrap_or_default();
-    match status.get("au").and_then(Value::as_string) {
-        Some("trustedDeviceSecondaryAuth") => return Ok(Stage::TrustedDevice { spd, sent: false }),
-        Some("secondaryAuth") => return Ok(Stage::Sms(spd)),
-        Some("repair") | None => {}
+    let au = status.get("au").and_then(Value::as_string);
+    let hsc = status.get("hsc").and_then(Value::as_signed_integer);
+    // What Apple asked for, in the log; `repair` means no second factor.
+    logf!("gsa: after sign-in Apple asked au={} hsc={}",
+          au.unwrap_or("-"), hsc.map(|h| h.to_string()).unwrap_or_else(|| "-".into()));
+    match au {
+        Some("trustedDeviceSecondaryAuth") => {
+            logf!("gsa: Apple asks for a code from the trusted devices");
+            return Ok(Stage::TrustedDevice { spd, sent: false });
+        }
+        Some("secondaryAuth") => {
+            logf!("gsa: Apple asks for a code by phone");
+            return Ok(Stage::Sms(spd));
+        }
+        // No second factor set up on the account: nothing more to do;
+        // `au=repair` wins over `hsc==409` (SideStore, isideload).
+        Some("repair") => {
+            logf!("gsa: no second factor on this Apple ID (repair)");
+            return Ok(Stage::LoggedIn(spd));
+        }
+        None => {}
         Some(other_step) => logf!("gsa: unknown extra step {other_step}; continuing"),
     }
-    if status.get("hsc").and_then(Value::as_signed_integer) == Some(409) {
+    if hsc == Some(409) {
+        logf!("gsa: Apple sent a code to the trusted devices (hsc 409)");
         return Ok(Stage::TrustedDevice { spd, sent: true });
     }
     Ok(Stage::LoggedIn(spd))
@@ -421,6 +440,13 @@ async fn second_factor_headers(gs: &GrandSlam, spd: &Dictionary, json: bool) -> 
 async fn trusted_device(gs: &GrandSlam, spd: &Dictionary, sent: bool, ask: &CodeAsker) -> Result<(), LoginError> {
     let send = gs.url("trustedDeviceSecondaryAuth").map_err(other)?;
     let validate = gs.url("validateCode").map_err(other)?;
+    // No trusted device and no trusted number (an Apple ID made without a
+    // phone): no code can be sent; the caller tries another client.
+    // A failed GET /auth does not block asking for a code; only Apple
+    // saying there is no trusted number or device does.
+    if no_way_to_get_a_code(&account_ways(gs, spd).await.unwrap_or_default()) {
+        return Err(LoginError::NoCode(NO_WAY_TO_GET_A_CODE.into()));
+    }
     if !sent {
         let status = gs.http.get(&send).headers(second_factor_headers(gs, spd, false).await?).send().await
             .map_err(other)?.status();
@@ -445,12 +471,61 @@ async fn trusted_device(gs: &GrandSlam, spd: &Dictionary, sent: bool, ask: &Code
     Err(other("too many wrong codes"))
 }
 
-/// The id of the number to text in Apple's `trustedPhoneNumbers` (GET /auth,
-/// or a 412's body): the first that takes text messages.
-fn phone_id(reply: &serde_json::Value) -> Option<u64> {
-    let numbers = reply.get("trustedPhoneNumbers")?.as_array()?;
-    numbers.iter().find(|n| n.get("pushMode").and_then(|m| m.as_str()) == Some("sms")).or(numbers.first())?
-        .get("id")?.as_u64()
+/// One trusted number as /auth lists it: its id and whether it takes text
+/// messages (pushMode "sms").
+#[derive(Debug, PartialEq, Eq)]
+struct Number {
+    id: u64,
+    sms: bool,
+}
+
+/// The account's ways to get a second-factor code, from GET /auth: its
+/// trusted numbers, and whether Apple says it has no trusted devices.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Ways {
+    numbers: Vec<Number>,
+    no_devices: bool,
+}
+
+fn ways_of(reply: &serde_json::Value) -> Ways {
+    let numbers = reply.get("trustedPhoneNumbers").and_then(|n| n.as_array()).map(|list| {
+        list.iter().filter_map(|n| Some(Number {
+            id: n.get("id")?.as_u64()?,
+            sms: n.get("pushMode").and_then(|m| m.as_str()) == Some("sms"),
+        })).collect()
+    }).unwrap_or_default();
+    Ways { numbers, no_devices: reply.get("noTrustedDevices").and_then(|v| v.as_bool()).unwrap_or(false) }
+}
+
+/// The id to text in `trustedPhoneNumbers` (GET /auth, or a 412's body):
+/// the first that takes text messages, else the first; None when /auth
+/// lists no trusted number.
+fn phone_to_text(ways: &Ways) -> Option<u64> {
+    ways.numbers.iter().find(|n| n.sms).or(ways.numbers.first()).map(|n| n.id)
+}
+
+/// No second-factor code can be sent: no trusted number and Apple says no
+/// trusted device (an Apple ID made without a phone). An absent
+/// `noTrustedDevices` is not proof of no device.
+fn no_way_to_get_a_code(ways: &Ways) -> bool {
+    ways.numbers.is_empty() && ways.no_devices
+}
+
+/// `LoginError::NoCode`'s `why` when Apple has nowhere to send a code.
+const NO_WAY_TO_GET_A_CODE: &str = "this Apple ID has no trusted phone number or Apple device";
+
+/// GET https://gsa.apple.com/auth with the second-factor identity: the
+/// account's trusted numbers and devices.
+async fn account_ways(gs: &GrandSlam, spd: &Dictionary) -> Result<Ways, LoginError> {
+    let resp = gs.http.get("https://gsa.apple.com/auth")
+        .headers(second_factor_headers(gs, spd, true).await?).send().await.map_err(other)?;
+    let status = resp.status();
+    let reply: serde_json::Value = resp.json().await.unwrap_or_default();
+    let ways = ways_of(&reply);
+    logf!("gsa: the account's ways ({status}): {} trusted number(s), noTrustedDevices {}, type {}",
+          ways.numbers.len(), ways.no_devices,
+          reply.get("authenticationType").and_then(|v| v.as_str()).unwrap_or("?"));
+    Ok(ways)
 }
 
 /// Apple's first `serviceErrors` entry of a JSON answer: its code and words.
@@ -472,7 +547,11 @@ async fn sms(gs: &GrandSlam, spd: &Dictionary, ask: &CodeAsker) -> Result<(), Lo
     let numbers = gs.http.get("https://gsa.apple.com/auth")
         .headers(second_factor_headers(gs, spd, true).await?).send().await.map_err(other)?;
     let listed = numbers.status();
-    let mut id = phone_id(&numbers.json().await.unwrap_or_default()).unwrap_or(1);
+    let listed_reply = numbers.json().await.unwrap_or_default();
+    // No trusted number listed (and no trusted device): no text message
+    // can be sent (not id 1); `noTrustedDevices` needs no extra check.
+    let ways = ways_of(&listed_reply);
+    let mut id = phone_to_text(&ways).ok_or_else(|| LoginError::NoCode(NO_WAY_TO_GET_A_CODE.into()))?;
     logf!("gsa: trusted phone numbers asked ({listed}); texting number {id}");
     for retried in [false, true] {
         let body = serde_json::json!({"phoneNumber": {"id": id}, "mode": "sms"});
@@ -487,7 +566,7 @@ async fn sms(gs: &GrandSlam, spd: &Dictionary, ask: &CodeAsker) -> Result<(), Lo
             break;
         }
         if status == reqwest::StatusCode::PRECONDITION_FAILED {
-            match phone_id(&reply) {
+            match phone_to_text(&ways_of(&reply)) {
                 Some(theirs) if theirs != id && !retried => {
                     id = theirs;
                     continue;
@@ -662,7 +741,7 @@ pub async fn login(email: &str, password: &str, ask: &CodeAsker, status: &(dyn F
                     last = LoginError::ServiceRefused(why);
                 }
                 Err(LoginError::NoCode(why)) => {
-                    logf!("gsa: {host} as {}: Apple sent no text message ({why})", claim.name());
+                    logf!("gsa: {host} as {}: no code can be sent ({why})", claim.name());
                     no_code.push(claim);
                     last = LoginError::NoCode(why);
                 }
@@ -764,13 +843,42 @@ mod tests {
     fn text_message_answers() {
         let listed = serde_json::json!({"trustedPhoneNumbers": [
             {"id": 3, "pushMode": "voice"}, {"id": 2, "pushMode": "sms", "nonFTEU": true}]});
-        assert_eq!(phone_id(&listed), Some(2));
-        assert_eq!(phone_id(&serde_json::json!({"trustedPhoneNumbers": [{"id": 4}]})), Some(4));
-        assert_eq!(phone_id(&serde_json::Value::Null), None);
+        assert_eq!(phone_to_text(&ways_of(&listed)), Some(2));
+        assert_eq!(phone_to_text(&ways_of(&serde_json::json!({"trustedPhoneNumbers": [{"id": 4}]}))), Some(4));
+        assert_eq!(phone_to_text(&ways_of(&serde_json::Value::Null)), None);
         let refused = serde_json::json!({"serviceErrors": [{"code": "-28248", "title": "Verification Failed",
             "message": "Verification codes can't be sent to this phone number at this time."}]});
         assert_eq!(service_error(&refused), Some(("-28248".into(),
             "Verification Failed: Verification codes can't be sent to this phone number at this time.".into())));
         assert_eq!(service_error(&serde_json::Value::Null), None);
+    }
+
+    /// GET /auth's account ways for the second factor: trusted numbers and
+    /// whether Apple says no trusted device exists; an Apple ID with no
+    /// trusted number or device (one made without a phone) has no way to
+    /// receive a code.
+    #[test]
+    fn account_ways_from_auth() {
+        let reply = serde_json::json!({"authenticationType": "hsa2", "noTrustedDevices": true, "trustedPhoneNumbers": [
+            {"id": 3, "pushMode": "voice", "numberWithDialCode": "+90 (\u{2022}\u{2022}\u{2022}) \u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}12"},
+            {"id": 2, "pushMode": "sms"}]});
+        let ways = ways_of(&reply);
+        assert_eq!(ways.numbers, vec![Number { id: 3, sms: false }, Number { id: 2, sms: true }]);
+        assert!(ways.no_devices);
+        assert!(!no_way_to_get_a_code(&ways)); // a trusted number can still receive a code
+        assert_eq!(phone_to_text(&ways), Some(2)); // the number that takes texts
+    }
+
+    /// `noTrustedDevices` without any trusted number means no code can be
+    /// sent; an absent flag is not proof of no device.
+    #[test]
+    fn no_way_when_no_number_and_no_device() {
+        assert!(no_way_to_get_a_code(&ways_of(&serde_json::json!({"noTrustedDevices": true}))));
+        assert!(no_way_to_get_a_code(&ways_of(&serde_json::json!({"noTrustedDevices": true, "trustedPhoneNumbers": []}))));
+        assert!(!no_way_to_get_a_code(&ways_of(&serde_json::json!({}))));
+        assert!(!no_way_to_get_a_code(&ways_of(&serde_json::json!({"noTrustedDevices": false}))));
+        assert!(!no_way_to_get_a_code(&ways_of(
+            &serde_json::json!({"noTrustedDevices": true, "trustedPhoneNumbers": [{"id": 1}]}))));
+        assert!(!no_way_to_get_a_code(&Ways { numbers: vec![], no_devices: false }));
     }
 }
