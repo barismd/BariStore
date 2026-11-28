@@ -133,7 +133,7 @@ pub fn in_use(port: u16) -> bool {
 /// `data` sent from a UDP port of its own to that same port at `host`, and
 /// whether it comes back to it within `wait`. LocalDevVPN hands every packet
 /// for its address back to the device with only the addresses swapped
-/// (device/session.rs `vpn_up`), so through it the datagram arrives at this
+/// (device/session.rs `route`), so through it the datagram arrives at this
 /// very socket; without it nothing does. The other tasks run while it waits.
 pub async fn udp_echo(host: &str, data: &[u8], wait: Duration) -> io::Result<bool> {
     let fd = rs::socket(rs::SOCK_DGRAM).map_err(Errno::io)?;

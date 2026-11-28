@@ -1,6 +1,6 @@
 [package]
 name = "baristore"
-version = "1.2.0-alpha.3"
+version = "1.2.0-alpha.4"
 edition = "2021"
 description = "An app store for iPhone and iPad that runs in rootshell: pairs, signs and installs on the device itself"
 license = "MIT"

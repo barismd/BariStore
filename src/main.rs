@@ -22,26 +22,20 @@ mod web;
 
 use std::process::ExitCode;
 
-use rootshell::osc::say;
+use rootshell::osc::{say, style, BOLD, CYAN, DIM, GREEN};
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOCATOR: rootshell::Nudging = rootshell::Nudging;
 
-const USAGE: &str = "usage: baristore            open the store in Safari
-       baristore page       show the store over rootshell (the BariStore Shortcut runs it)
-       baristore install    set up the baristore command
-       baristore update     install the newest BariStore
-       baristore log        print the log (as Options › Log)
-       baristore --version";
+const USAGE: &str = "baristore           open the store
+baristore update    update it
+baristore log       print the log
+baristore --version";
 
 /// The exit code after the store installed a new build: the `baristore`
 /// command (install.rs `ROOTSHELLRC`) starts the new file at once.
 pub const UPDATED: i32 = 75;
-
-/// The port the BariStore Shortcut opens the page on
-/// (http://127.0.0.1:46510/): the store takes it whenever it is free.
-pub const PAGE_PORT: u16 = 46510;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,15 +59,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// Whether the store starts for the Shortcut (`page`): the page opens over
-/// rootshell, at PAGE_PORT, without a key (web.rs `arm`).
-fn for_shortcut(args: &[String]) -> bool {
-    args.first().map(String::as_str) == Some("page")
-}
-
 async fn run(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
-        None | Some("page") => serve(for_shortcut(&args)).await,
+        None => serve().await,
+        // The install line's step (docs/install.sh), not for typing.
         Some("install") => {
             install::set_up_command().await;
             Ok(())
@@ -81,8 +70,11 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         Some("update") => {
             let outcome = update::download_and_replace(&|step: String| say(&step)).await?;
             match outcome {
-                update::Outcome::UpToDate => say(&format!("BariStore {} is the newest build.", env!("CARGO_PKG_VERSION"))),
-                update::Outcome::Updated(version) => say(&format!("Updated to {version}. Type baristore to open the store.")),
+                update::Outcome::UpToDate => say(&format!("BariStore {} is the newest.", env!("CARGO_PKG_VERSION"))),
+                update::Outcome::Updated(version) => {
+                    say(&format!("Updated to {version}."));
+                    say("Type baristore to open it.");
+                }
             }
             Ok(())
         }
@@ -90,7 +82,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
             say(&doctor::report(false).await);
             Ok(())
         }
-        Some("--version") | Some("-V") => {
+        Some("--version") => {
             say(update::MARK.trim_matches('\0'));
             Ok(())
         }
@@ -105,30 +97,27 @@ async fn run(args: Vec<String>) -> Result<(), String> {
 
 /// `baristore.wasm --join …`, which the `baristore` command (and the
 /// install line) runs first while a store may be running in another tab
-/// (`live`): rootshell holds a
-/// new tab's ifconfig, curl and mkdir until the program in another tab
-/// ends (atelier-install saw it on a device), so the command runs none of
-/// them before this. Hands what was asked to the running store, or runs a
-/// command that needs no store, and ends with success; ends with 1 when no
-/// store answers, and the command then starts one.
+/// (`live`): rootshell holds a new tab's ifconfig, curl and mkdir until the
+/// program in another tab ends (atelier-install saw it on a device), so
+/// the command runs none of them before this. Opens the running store's
+/// page (the install line also sets up the command), or runs a command
+/// that needs no store, and ends with success; ends with 1 when no store
+/// answers, and the command then starts one.
 async fn join(args: Vec<String>) -> ExitCode {
-    if !matches!(args.first().map(String::as_str), None | Some("page") | Some("install")) {
+    let first = args.first().map(String::as_str);
+    if !matches!(first, None | Some("install")) {
         if let Err(message) = run(args).await {
             eprintln!("baristore: {message}");
         }
         return ExitCode::SUCCESS;
     }
-    let shortcut = for_shortcut(&args);
     match Running::load() {
-        // The install line again while the store runs: the command only.
-        Some(r) if answers(&r).await && args.first().map(String::as_str) == Some("install") => {
-            install::set_up_command().await;
-            say("BariStore is running in another rootshell tab: Options › Update BariStore there installs the \
-                 newest build.");
-            ExitCode::SUCCESS
-        }
         Some(r) if answers(&r).await => {
-            hand_over(&r, shortcut).await;
+            if first == Some("install") {
+                install::set_up_command().await;
+            }
+            say(&style(BOLD, "BariStore is already running."));
+            open_page(&r.url());
             ExitCode::SUCCESS
         }
         _ => {
@@ -172,46 +161,55 @@ async fn answers(r: &Running) -> bool {
     ask.await.is_some()
 }
 
-/// To the store running in another tab: a page to open for the Shortcut
-/// (and its port), or, typed, where the store is.
-async fn hand_over(r: &Running, shortcut: bool) {
-    if !shortcut {
-        say("BariStore is already running in another rootshell tab.");
-        tell_where(&r.url());
+/// Opens the page in Safari: rootshell does it with its Settings ›
+/// Terminal › Open Links from Programs on; else the link below opens with
+/// a touch and hold (the address itself is too long for a line).
+fn open_page(url: &str) {
+    rootshell::osc::open_url(url);
+    say(&format!("{} {}", style(GREEN, "▶"), style(BOLD, &rootshell::osc::link(url, "Open BariStore"))));
+    say(&style(DIM, "(no Safari? touch and hold it)"));
+}
+
+/// What to set once, before the first start: lines of 34 columns at most
+/// (osc.rs). The page and README say the same in more words.
+const CHECKLIST: &[&str] = &[
+    "Before you start:",
+    "",
+    "1. Developer Mode: On",
+    "   Settings › Privacy & Security",
+    "2. LocalDevVPN: Connect, on Wi-Fi",
+    "3. rootshell › Settings › General",
+    "   Location Diary Mode: On",
+    "   Terminal Notifications: On",
+    "4. rootshell › Settings › Terminal",
+    "   Open Links from Programs: On",
+    "5. Local Network: Allow",
+    "   (when rootshell asks)",
+];
+
+/// The checklist, the first time BariStore starts, until Return.
+fn first_start() {
+    let seen = state::path("welcomed");
+    if seen.exists() {
         return;
     }
-    let http = http::Client::builder().timeout(std::time::Duration::from_secs(10)).fresh_connections().build();
-    let body = serde_json::json!({"port": PAGE_PORT});
-    let reply = http.post(&format!("{}api/arm", r.url())).json(&body).send().await;
-    let answer: serde_json::Value = match reply {
-        Ok(reply) => reply.json().await.unwrap_or_default(),
-        Err(e) => serde_json::json!({"message": e.to_string()}),
-    };
-    if answer["ok"] == true {
-        say("BariStore runs in another rootshell tab, and its page shows over rootshell now. rootshell opens a new \
-             tab for each run of the Shortcut: this one can be closed.");
-    } else {
-        say(&format!("BariStore runs in another rootshell tab, but did not take the Shortcut's page ({}).",
-                     answer["message"].as_str().unwrap_or("no answer")));
+    for (i, line) in CHECKLIST.iter().enumerate() {
+        let shown = if i == 0 { style(&format!("{BOLD};{CYAN}"), line) } else { line.to_string() };
+        say(&shown);
     }
+    say("");
+    say(&style(BOLD, "Press Return to open the store."));
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    let _ = state::write_private(&seen, b"");
+    say("");
 }
 
-/// Opens the page in Safari: rootshell does it with its Settings ›
-/// Terminal › Open Links from Programs on; else the address it shows opens
-/// with a touch and hold.
-fn tell_where(url: &str) {
-    say(&format!("The store opens in Safari: {}", rootshell::osc::link(url, url)));
-    say("Nothing opened? Touch and hold the address and tap Open Link (with rootshell's Settings › Terminal › Open \
-         Links from Programs on, it opens by itself).");
-    rootshell::osc::open_url(url);
-}
-
-/// A port no program on the device listens on: the Shortcut's first.
+/// A port no program on the device listens on: the last one, so a page
+/// left open in Safari finds the store again.
 fn free_port(saved: Option<u16>) -> u16 {
-    for p in [Some(PAGE_PORT), saved].into_iter().flatten() {
-        if !net::in_use(p) {
-            return p;
-        }
+    if let Some(p) = saved.filter(|p| !net::in_use(*p)) {
+        return p;
     }
     loop {
         let p = 49200 + rand::random::<u16>() % 12000;
@@ -221,20 +219,23 @@ fn free_port(saved: Option<u16>) -> u16 {
     }
 }
 
-/// The store: serves the page until Options › Quit, Ctrl-C or an update.
-/// `shortcut`: started for the Shortcut, which shows the page over rootshell.
-async fn serve(shortcut: bool) -> Result<(), String> {
+/// The store: serves the page until it is quit (its page's power button,
+/// Ctrl-C, three idle minutes) or updated.
+async fn serve() -> Result<(), String> {
     if !rootshell::has_recv_timeouts() {
-        return Err("this rootshell is too old for BariStore: update rootshell from the App Store (1.0.16-177 or \
-                    newer is needed).".into());
+        return Err("update rootshell first".into());
     }
     let saved = Running::load();
     if let Some(r) = saved.as_ref() {
         if answers(r).await {
-            hand_over(r, shortcut).await;
+            say(&style(BOLD, "BariStore is already running."));
+            open_page(&r.url());
             return Ok(());
         }
     }
+    say(&style(BOLD, &format!("BariStore {}", env!("CARGO_PKG_VERSION"))));
+    say("");
+    first_start();
     let running = Running {
         port: free_port(saved.as_ref().map(|r| r.port)),
         token: saved.map(|r| r.token).filter(|t| t.len() == 32).unwrap_or_else(|| hex::encode(rand::random::<[u8; 16]>())),
@@ -242,25 +243,14 @@ async fn serve(shortcut: bool) -> Result<(), String> {
     let listener = net::TcpListener::bind(running.port).map_err(|e| format!("cannot serve the page on port {}: {e}", running.port))?;
     running.save();
     let _ = state::write_private(&state::live_path(), app::boot_id().as_bytes());
-    web::set_keys(&running.token);
-    if shortcut {
-        web::arm();
-    }
-    logf!("baristore {} starting on port {}{}", env!("CARGO_PKG_VERSION"), running.port,
-          if shortcut { ", for the Shortcut" } else { "" });
-    say(&format!("BariStore {}", env!("CARGO_PKG_VERSION")));
-    if shortcut && running.port != PAGE_PORT {
-        say(&format!("Port {PAGE_PORT}, where the Shortcut looks, is taken by another program: open the store in \
-                      Safari instead."));
-        say(&rootshell::osc::link(&running.url(), &running.url()));
-    } else if shortcut {
-        say("The store shows over rootshell, in the Shortcut's page.");
-    } else {
-        tell_where(&running.url());
-    }
-    say("Keep this tab open: BariStore runs here. Ctrl-C quits it (Options › Quit too).");
-    say("So that it keeps running while you are in Safari, Settings or another app, turn on rootshell's Location \
-         Diary Mode (Settings › General, Mode Auto During Active Sessions).");
+    web::set_key(&running.token);
+    device::session::note_wifi();
+    logf!("baristore {} starting on port {}", env!("CARGO_PKG_VERSION"), running.port);
+    open_page(&running.url());
+    say("");
+    say("BariStore runs in this tab.");
+    say(&style(DIM, "It quits after 3 idle minutes,"));
+    say(&style(DIM, "with ⏻ on its page or Ctrl-C."));
     let store = app::App::new();
     web::serve(store, listener).await;
     Ok(())

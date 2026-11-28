@@ -2,17 +2,11 @@
 //! (other apps and websites on the device can reach a loopback port, but
 //! not guess the path), Host checked against the loopback (no DNS
 //! rebinding; rootshell's listener takes connections on every address the
-//! device has, so this also keeps the network out). The page opens in
-//! Safari under the store's own key, or, with the optional BariStore
-//! Shortcut, over rootshell in the Shortcut's web view. The Shortcut opens
-//! http://127.0.0.1:46510/ without a key, after its Open Local Shell ran
-//! `baristore page`: that arms the store (`arm`), and the first request for
-//! the bare address within a minute is sent on to a key made for it, kept
-//! with the Shortcut's keys.
-//! Another app on the device would have to ask in that minute, before the
-//! Shortcut does (the user sees the page fail then). A file handed to
-//! another app (Install to LiveContainer) has an address of its own, see
-//! `Share`.
+//! device has, so this also keeps the network out). Safari opens it (main.rs
+//! `open_page`). A file handed to another app (Install to LiveContainer)
+//! has an address of its own, see `Share`. The store quits after three
+//! minutes without a tap on the page or a task (`IDLE`): rootshell keeps it
+//! running behind other apps for as long as it runs (Location Diary Mode).
 
 use serde_json::{json, Value as Json};
 use std::collections::HashMap;
@@ -34,103 +28,53 @@ const LOGO: &[u8] = include_bytes!("../assets/baristore.svg");
 const HEAD_WAIT: Duration = Duration::from_secs(15);
 /// An upload that sends nothing for this long has stopped.
 const BODY_WAIT: Duration = Duration::from_secs(60);
-/// The Shortcut's keys kept (`page-keys`): an open web view keeps working
-/// across a restart (an update), a new run of the Shortcut adds one.
-const SHORTCUT_KEYS: usize = 8;
-/// How long `baristore page` leaves the bare address open for the
-/// Shortcut's web view.
-const ARMED_FOR: Duration = Duration::from_secs(60);
+/// How long the store waits without a tap on its page or a task before it
+/// quits.
+const IDLE: Duration = Duration::from_secs(180);
 
-/// The keys the page may come under: the store's own (Safari) and the
-/// Shortcut's.
-struct Keys {
-    own: String,
-    shortcut: Vec<String>,
+/// The page's key: the address's path, kept across restarts (main.rs
+/// `Running`).
+static KEY: Mutex<String> = Mutex::new(String::new());
+
+pub fn set_key(key: &str) {
+    *KEY.lock().unwrap_or_else(|e| e.into_inner()) = key.to_string();
 }
 
-static KEYS: Mutex<Keys> = Mutex::new(Keys { own: String::new(), shortcut: Vec::new() });
+/// When the page was last used (a tap, an upload) or a task last ran.
+static LAST_USE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-fn keys() -> std::sync::MutexGuard<'static, Keys> {
-    KEYS.lock().unwrap_or_else(|e| e.into_inner())
+fn used() {
+    *LAST_USE.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
 }
 
-/// A kept key: 32 hex digits.
-fn valid_key(key: &str) -> bool {
-    key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Until when the bare address is sent on to a new key (`baristore page`).
-static ARMED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-
-/// The Shortcut's web view comes next: the bare address answers it once.
-pub fn arm() {
-    *ARMED.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now() + ARMED_FOR);
-}
-
-/// Whether the bare address may be answered now; it is then closed again.
-fn disarm() -> bool {
-    let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-    armed.take().is_some_and(|until| std::time::Instant::now() < until)
-}
-
-/// The store's own key, and the Shortcut's keys from earlier runs.
-pub fn set_keys(own: &str) {
-    let saved = std::fs::read_to_string(crate::state::path("page-keys")).unwrap_or_default();
-    let mut k = keys();
-    k.own = own.to_string();
-    k.shortcut = saved.lines().map(str::trim).filter(|l| valid_key(l)).map(str::to_string).collect();
-}
-
-/// A key made for a run of the Shortcut, kept for the next starts.
-fn add_shortcut_key(key: &str) {
-    let mut k = keys();
-    k.shortcut.retain(|old| old != key);
-    k.shortcut.insert(0, key.to_string());
-    k.shortcut.truncate(SHORTCUT_KEYS);
-    let text: String = k.shortcut.iter().map(|l| format!("{l}\n")).collect();
-    if let Err(e) = crate::state::write_private(&crate::state::path("page-keys"), text.as_bytes()) {
-        logf!("web: the Shortcut's key not kept: {e}");
+/// Quits the store once it has been idle for `IDLE`.
+async fn quit_when_idle(app: App) {
+    used();
+    loop {
+        rt::time::sleep(Duration::from_secs(5)).await;
+        if app.busy() {
+            used();
+            continue;
+        }
+        let since = LAST_USE.lock().unwrap_or_else(|e| e.into_inner()).map_or(Duration::ZERO, |t| t.elapsed());
+        if since >= IDLE {
+            logf!("idle for {} minutes: quitting", IDLE.as_secs() / 60);
+            crate::state::end(0);
+        }
     }
 }
-
-/// Under which key a request came: Some(true) for one of the Shortcut's.
-fn key_kind(key: &str) -> Option<bool> {
-    let k = keys();
-    if !k.own.is_empty() && key == k.own {
-        Some(false)
-    } else {
-        k.shortcut.iter().any(|s| s == key).then_some(true)
-    }
-}
-
-/// The ports served (the Shortcut's comes on top when the store had to
-/// take another).
-static PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
 /// Serves the page on `listener`: each connection in a task of its own.
 pub async fn serve(app: App, listener: TcpListener) {
-    let port = listener.port();
-    let _ = PORT.set(port);
-    PORTS.lock().unwrap_or_else(|e| e.into_inner()).push(port);
+    let _ = PORT.set(listener.port());
+    rt::spawn(quit_when_idle(app.clone()));
     loop {
         let Ok(stream) = listener.accept().await else { continue };
         let app = app.clone();
         rt::spawn(async move {
-            let _ = handle(stream, app, port).await;
+            let _ = handle(stream, app).await;
         });
     }
-}
-
-/// Serves on `port` too, once (the Shortcut's, when the store runs on
-/// another).
-fn also_serve(app: &App, port: u16) -> Result<(), String> {
-    if PORTS.lock().unwrap_or_else(|e| e.into_inner()).contains(&port) {
-        return Ok(());
-    }
-    let listener = TcpListener::bind(port).map_err(|e| format!("cannot serve on port {port}: {e}"))?;
-    logf!("web: serving on port {port} too");
-    rt::spawn(serve(app.clone(), listener));
-    Ok(())
 }
 
 async fn respond(stream: &mut TcpStream, status: &str, kind: &str, body: &[u8]) -> std::io::Result<()> {
@@ -156,7 +100,8 @@ async fn read_some(stream: &mut TcpStream, buf: &mut [u8], wait: Duration) -> st
         .unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "nothing came")))
 }
 
-async fn handle(mut stream: TcpStream, app: App, port: u16) -> std::io::Result<()> {
+async fn handle(mut stream: TcpStream, app: App) -> std::io::Result<()> {
+    let port = PORT.get().copied().unwrap_or(0);
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     let header_end = loop {
@@ -195,23 +140,11 @@ async fn handle(mut stream: TcpStream, app: App, port: u16) -> std::io::Result<(
         return send_share(&mut stream, rest).await;
     }
     let rest = path.strip_prefix('/').unwrap_or(path);
-    if rest.is_empty() && method == "GET" {
-        // The Shortcut's web view, after `baristore page`: on to a key of its own.
-        if !disarm() {
-            return respond(&mut stream, "404 Not Found", "text/plain; charset=utf-8",
-                           "Open BariStore with its Shortcut.".as_bytes()).await;
-        }
-        let key = hex::encode(rand::random::<[u8; 16]>());
-        add_shortcut_key(&key);
-        logf!("web: the Shortcut's page opened");
-        let head = format!("HTTP/1.1 302 Found\r\nLocation: /{key}/\r\nCache-Control: no-store\r\n\
-                            Content-Length: 0\r\nConnection: close\r\n\r\n");
-        return stream.write_all(head.as_bytes()).await;
-    }
     let (key, route) = rest.find('/').map_or((rest, ""), |i| (&rest[..i], &rest[i..]));
-    let Some(shortcut) = key_kind(key) else {
+    let known = { let k = KEY.lock().unwrap_or_else(|e| e.into_inner()); !k.is_empty() && *k == key };
+    if !known {
         return respond(&mut stream, "404 Not Found", "text/plain", b"").await;
-    };
+    }
     if route.is_empty() {
         // The page's address without its last '/': the page's own
         // addresses are relative to it.
@@ -239,7 +172,9 @@ async fn handle(mut stream: TcpStream, app: App, port: u16) -> std::io::Result<(
         return respond(&mut stream, "200 OK", "application/json", reply.to_string().as_bytes()).await;
     }
     if method == "POST" && route.starts_with("/api/upload") {
+        used();
         let reply = upload(&mut stream, &buf[header_end..], length).await;
+        used();
         return respond(&mut stream, "200 OK", "application/json", reply.to_string().as_bytes()).await;
     }
     if length > 1 << 20 {
@@ -273,28 +208,17 @@ async fn handle(mut stream: TcpStream, app: App, port: u16) -> std::io::Result<(
             respond(&mut stream, "200 OK", "application/json", s.as_bytes()).await
         }
         ("GET", "/api/state") => {
-            let mut s = app.snapshot();
-            // Shown over rootshell by the Shortcut, or in Safari: the page words its hints so.
-            s["shortcut"] = json!(shortcut);
-            s["page_port"] = json!(crate::PAGE_PORT);
+            let s = app.snapshot();
             respond(&mut stream, "200 OK", "application/json", s.to_string().as_bytes()).await
         }
         ("GET", "/api/catalog") => {
             let s = app.catalog().to_string();
             respond(&mut stream, "200 OK", "application/json", s.as_bytes()).await
         }
-        // A new run of the Shortcut while this store runs (main.rs `join`):
-        // the bare address opens for it, on its port when this store had to
-        // take another.
-        ("POST", "/api/arm") => {
-            let request: Json = serde_json::from_slice(&body).unwrap_or(Json::Null);
-            arm();
-            let port = request.get("port").and_then(Json::as_u64).and_then(|p| u16::try_from(p).ok());
-            let reply = match port.map(|p| also_serve(&app, p)) {
-                Some(Err(e)) => json!({"ok": false, "message": e}),
-                _ => json!({"ok": true}),
-            };
-            respond(&mut stream, "200 OK", "application/json", reply.to_string().as_bytes()).await
+        // A tap or a key on the page (sent at most every 20 s): in use.
+        ("POST", "/api/use") => {
+            used();
+            respond(&mut stream, "200 OK", "application/json", b"{}").await
         }
         ("POST", "/api/action") => {
             let request: Json = serde_json::from_slice(&body).unwrap_or(Json::Null);
@@ -561,8 +485,8 @@ async fn action(app: &App, r: &Json) -> Json {
     }
     match name.as_str() {
         "check" => {
-            if !app.check_vpn().await {
-                return fail(crate::device::session::NO_ROUTE.into());
+            if let Err(e) = app.check_route().await {
+                return fail(e);
             }
             if crate::pairing::flow::load_record().is_some() {
                 if let Err(e) = app.device().await {

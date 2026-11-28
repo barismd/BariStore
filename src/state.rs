@@ -24,7 +24,8 @@ pub fn live_path() -> PathBuf {
     path("live")
 }
 
-/// Ends the store (Options › Quit, an update): no longer running.
+/// Ends the store (its page's ⏻, three idle minutes, an update): no
+/// longer running.
 pub fn end(code: i32) -> ! {
     let _ = std::fs::remove_file(live_path());
     std::process::exit(code)

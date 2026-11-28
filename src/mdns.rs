@@ -151,10 +151,10 @@ fn ifconfig_lines(text: &str) -> Vec<&str> {
     lines
 }
 
-/// The IPv4 addresses `ifconfig` output names, en0's (Wi-Fi) first; never
+/// The interfaces and IPv4 addresses `ifconfig` output names; never
 /// loopback, link-local or the VPN's tunnels.
-pub fn ifconfig_addresses(text: &str) -> Vec<[u8; 4]> {
-    let (mut wifi, mut other) = (Vec::new(), Vec::new());
+fn ifconfig_inets(text: &str) -> Vec<(String, [u8; 4])> {
+    let mut found = Vec::new();
     let mut iface = String::new();
     for line in ifconfig_lines(text) {
         if !line.starts_with([' ', '\t']) {
@@ -171,10 +171,23 @@ pub fn ifconfig_addresses(text: &str) -> Vec<[u8; 4]> {
         if ip.is_loopback() || o[0] == 169 && o[1] == 254 || iface.starts_with("utun") || iface.starts_with("ipsec") {
             continue;
         }
-        if iface == "en0" { wifi.push(o) } else { other.push(o) }
+        found.push((iface.clone(), o));
     }
-    wifi.extend(other);
-    wifi
+    found
+}
+
+/// The IPv4 addresses `ifconfig` output names, en0's (Wi-Fi) first.
+pub fn ifconfig_addresses(text: &str) -> Vec<[u8; 4]> {
+    let found = ifconfig_inets(text);
+    let wifi = found.iter().filter(|(i, _)| i == "en0");
+    let other = found.iter().filter(|(i, _)| i != "en0");
+    wifi.chain(other).map(|(_, a)| *a).collect()
+}
+
+/// Whether `ifconfig` output shows Wi-Fi joined: en0, the Wi-Fi interface
+/// on iPhone and iPad, has an IPv4 address only then.
+pub fn wifi_joined(text: &str) -> bool {
+    ifconfig_inets(text).iter().any(|(i, _)| i == "en0")
 }
 
 /// This device's own addresses for the A record, and where they came from.
@@ -302,6 +315,20 @@ mod tests {
                     en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\
                     \thwassist=20000<VLAN_MTU>\tinet 192.168.1.20 netmask 0xffffff00 broadcast 192.168.1.255\n";
         assert_eq!(ifconfig_addresses(text), vec![[192, 168, 1, 20], [10, 142, 7, 9]]);
+        assert!(wifi_joined(text));
+    }
+
+    /// On mobile data en0 has no IPv4 address: only the carrier's
+    /// interface and LocalDevVPN's tunnel have one.
+    #[test]
+    fn no_wifi_on_mobile_data() {
+        let text = "pdp_ip0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1450\n\
+                    \tinet 10.142.7.9 --> 10.142.7.9 netmask 0xffffffff\n\
+                    utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500\n\tinet 10.7.0.0 --> 10.7.0.1 netmask 0xffffff00\n\
+                    en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\tether 1a:2b:3c:4d:5e:6f\n\
+                    \tinet6 fe80::1%en0 prefixlen 64 secured scopeid 0xb\n\tstatus: inactive\n";
+        assert!(!wifi_joined(text));
+        assert_eq!(ifconfig_addresses(text), vec![[10, 142, 7, 9]]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

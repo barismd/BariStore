@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
+use std::sync::OnceLock;
 use std::time::Duration;
 use serde_json::{json, Value as Json};
 
@@ -56,30 +57,52 @@ pub fn host_uuid() -> [u8; 16] {
     *u.as_bytes()
 }
 
-/// Is LocalDevVPN answering? It hands every IPv4 packet for 10.7.0.1 back to
-/// the device with source and destination address swapped, ports unchanged
-/// (its PacketTunnelProvider, read 2026-11-28), so a datagram from port P to
+/// Whether the device was on Wi-Fi as this store started, from the
+/// `ifconfig` output the `baristore` command saves just before it starts
+/// the program (install.rs `ROOTSHELLRC`): a WebAssembly program in
+/// rootshell cannot ask. None when that file is not from this start.
+static WIFI: OnceLock<Option<bool>> = OnceLock::new();
+
+/// Notes `WIFI`, at the store's start.
+pub fn note_wifi() {
+    let path = state::path("ifconfig.txt");
+    let fresh = std::fs::metadata(&path).and_then(|m| m.modified()).ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age < Duration::from_secs(120));
+    let joined = if fresh { std::fs::read_to_string(&path).ok().map(|t| crate::mdns::wifi_joined(&t)) } else { None };
+    logf!("device: Wi-Fi at start: {}", match joined { Some(true) => "joined", Some(false) => "not joined", None => "unknown" });
+    let _ = WIFI.set(joined);
+}
+
+pub const NO_WIFI: &str = "Not on Wi-Fi. Join Wi-Fi, then quit BariStore (⏻) and type baristore in rootshell again.";
+pub const NO_VPN: &str = "LocalDevVPN is not connected: open it and tap Connect.";
+
+/// Wi-Fi (as BariStore started) and LocalDevVPN, or which one is missing.
+/// LocalDevVPN hands every IPv4 packet for 10.7.0.1 back to the device with
+/// source and destination address swapped, ports unchanged (its
+/// PacketTunnelProvider, read 2026-11-28), so a datagram from a port P to
 /// 10.7.0.1:P comes back to the socket that sent it; without it nothing
-/// comes back. (A datagram to a closed port's ICMP refusal names the
-/// swapped ports, so it never reached the socket that asked: 1.2.0-alpha.2
-/// and older saw no LocalDevVPN at all.) A datagram, not a TCP connection:
-/// rootshell's connect has no time limit, and a SYN nobody answers would
-/// hold up the whole program.
-pub async fn vpn_up() -> bool {
+/// comes back. It does on mobile data too, which the device's services
+/// refuse, hence Wi-Fi first. A datagram, not a TCP connection: rootshell's
+/// connect has no time limit, and a SYN nobody answers would hold up the
+/// whole program.
+pub async fn route() -> Result<(), &'static str> {
+    if override_endpoint().is_none() && WIFI.get().copied().flatten() == Some(false) {
+        return Err(NO_WIFI);
+    }
     let host = override_endpoint().map_or_else(|| LOOPBACK.to_string(), |(h, _)| h);
-    // Up to three tries: back in the foreground, the first can go nowhere
-    // while LocalDevVPN comes back (the owner's second try a few seconds
-    // later always connected, 1.1.0).
-    for _ in 0..3 {
+    // Two tries: back in the foreground, the first can go nowhere while
+    // LocalDevVPN comes back (the owner's log, 1.1.0).
+    for _ in 0..2 {
         let word = format!("BariStore {}", hex::encode(rand::random::<[u8; 8]>()));
-        match crate::net::udp_echo(&host, word.as_bytes(), Duration::from_millis(1500)).await {
-            Ok(true) => return true,
+        match crate::net::udp_echo(&host, word.as_bytes(), Duration::from_millis(600)).await {
+            Ok(true) => return Ok(()),
             Ok(false) => logf!("device: nothing came back from {host}"),
             Err(e) => logf!("device: {host}: {e}"),
         }
-        rt::time::sleep(Duration::from_millis(500)).await;
+        rt::time::sleep(Duration::from_millis(300)).await;
     }
-    false
+    Err(NO_VPN)
 }
 
 /// BARISTORE_DEVICE=host:port points at a mock device in tests.

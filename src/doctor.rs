@@ -32,8 +32,9 @@ pub async fn report(checks: bool) -> String {
     let noted = crate::mdns::ifconfig_addresses(&std::fs::read_to_string(state::path("ifconfig.txt")).unwrap_or_default());
     let shown: Vec<String> = noted.iter().map(|a| std::net::Ipv4Addr::from(*a).to_string()).collect();
     let _ = writeln!(out, "address     {}", if shown.is_empty() { "none noted (start with baristore)".to_string() } else { shown.join(", ") });
-    let vpn = session::vpn_up().await;
-    let _ = writeln!(out, "LocalDevVPN {}", if vpn { "answers" } else { "NO ANSWER" });
+    let route = session::route().await;
+    let _ = writeln!(out, "connection  {}", match route { Ok(()) => "Wi-Fi and LocalDevVPN", Err(e) => e });
+    let vpn = route.is_ok();
     if checks && vpn {
         let _ = writeln!(out, "pairing svc {}", match session::endpoint().await {
             Ok((host, port)) => format!("{host}:{port}"),

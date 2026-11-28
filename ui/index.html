@@ -32,6 +32,9 @@ header.top { padding: calc(14px + env(safe-area-inset-top)) 0 8px; display: flex
 header.top img { width: 40px; height: 40px; }
 header.top h1 { flex: 1; min-width: 0; }
 header.top .pill { padding: 6px 12px; font-size: 14px; }
+.power { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--chip); color: var(--muted); }
+.power svg { width: 16px; height: 16px; }
 h1.large { margin: 2px 0 10px; }
 h1 { font-size: 30px; letter-spacing: -.02em; margin: 0; }
 h2 { font-size: 20px; margin: 24px 0 10px; letter-spacing: -.01em; }
@@ -181,14 +184,8 @@ input.picker { position: fixed; left: -9999px; top: 0; opacity: 0; }
 "use strict";
 const T = location.pathname.replace(/\/$/, "");
 let S = null, C = { apps: [], sources: [], suggested: [], refreshing: false };
-/** Shown over rootshell in the BariStore Shortcut's web view (the store says so), not in Safari. */
-let overRootshell = false;
-/** Where to look when BariStore does not answer. */
-function whereIsStore() {
-  return overRootshell
-    ? "Close this page (✕): BariStore's tab in rootshell says what happened (type <b>baristore</b> there if it stopped). Then run the <b>BariStore</b> Shortcut again."
-    : "Open rootshell: BariStore runs in its tab. If it stopped, type <b>baristore</b> there; this page then works again by itself.";
-}
+/** What to do when BariStore does not answer (it quit, or rootshell stopped it). */
+const START_AGAIN = "Type <b>baristore</b> in rootshell to start it again. This page comes back by itself.";
 let tab = "featured", query = "", detail = null, sheet = null;
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -211,7 +208,7 @@ async function act(action, extra = {}) {
     return j;
   } catch (e) {
     poll();
-    return { ok: false, message: "BariStore does not answer. " + whereIsStore().replace(/<\/?b>/g, "") };
+    return { ok: false, message: "BariStore is not running. " + START_AGAIN.replace(/<\/?b>/g, "") };
   }
 }
 function toast(msg) {
@@ -310,10 +307,13 @@ const tabIcons = {
   options: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
 };
 const GEAR = tabIcons.options;
+const POWER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.4 6.6a8 8 0 1 0 11.2 0"/></svg>';
+/** The power button, top right everywhere: BariStore runs on in rootshell (Location Diary Mode) until it quits. */
+const powerButton = () => `<button class="power" onclick="confirmQuit()" aria-label="Quit BariStore">${POWER}</button>`;
 /** The logo and the title; with buttons, they take the top row (as iOS's toolbars) and the title goes under them. */
 function header(title, extra = "") {
-  return extra ? `<header class="top"><img src="logo.svg" alt=""><div class="grow"></div>${extra}</header><h1 class="large">${title}</h1>`
-    : `<header class="top"><img src="logo.svg" alt=""><h1>${title}</h1></header>`;
+  return extra ? `<header class="top"><img src="logo.svg" alt=""><div class="grow"></div>${extra}${powerButton()}</header><h1 class="large">${title}</h1>`
+    : `<header class="top"><img src="logo.svg" alt=""><h1>${title}</h1>${powerButton()}</header>`;
 }
 function toggleRow(id, label, note, on, disabled) {
   return `<div class="row"><div class="grow"><div>${label}</div><div class="muted small">${note}</div></div>
@@ -330,27 +330,11 @@ function needsSetup() { return S && (!S.setup.paired || !S.setup.signed_in || !S
 
 function pairingHow() {
   return `<ol class="how small">
-    <li>Open <b>Settings › Privacy & Security › Developer Mode</b>. It is there now, even if it was not before.${overRootshell ? " This page closes as you go: that is fine." : ""}</li>
-    <li>Developer Mode off? Turn it on first: the device restarts. Then open BariStore again and tap Start pairing again.</li>
+    <li>Open <b>Settings › Privacy & Security › Developer Mode</b>. It is there now, even if it was not before.</li>
+    <li>Developer Mode off? Turn it on first: the device restarts. Then type <b>baristore</b> in rootshell and tap Start pairing again.</li>
     <li>At the bottom of that page, tap <b>Pair with BariStore</b> and enter your passcode.</li>
-    <li>Type the 6-digit code above (it comes as rootshell's notification too).</li>
-    <li>${overRootshell ? "Then run the <b>BariStore</b> Shortcut again: setup goes on where it was." : "Then come back to Safari: setup goes on by itself."}</li></ol>
-    <p class="muted small">rootshell keeps BariStore running meanwhile only with its Location Diary Mode on, and pairing needs its Local Network access: see Before you start.</p>`;
-}
-/** Before you start: open until setup's steps begin (pairing, or a later step), then one line; the user can open or close it. */
-let beforeOpen = null;
-function beforeYouStart(started) {
-  const open = beforeOpen ?? !started;
-  const head = `<button class="link" style="display:flex;width:100%;justify-content:space-between;padding:0;font-weight:700;color:inherit" onclick="beforeOpen=${!open};render()">
-    <span>Before you start</span><span class="muted small" style="font-weight:400">${open ? "Hide" : "Show"}</span></button>`;
-  if (!open) return `<div class="card pad">${head}</div>`;
-  return `<div class="card pad">${head}<ol class="how small">
-    <li><b>Developer Mode</b> on: Settings › Privacy & Security › Developer Mode › On, then Restart and confirm. Not listed there? It appears when you start pairing (step 2): turn it on then.</li>
-    <li><b>LocalDevVPN</b> (App Store): on Wi-Fi, open it and tap Connect.</li>
-    <li>In <b>rootshell › Settings › General</b>: <b>Location Diary Mode</b> on, Mode <b>Auto During Active Sessions</b> (allow location when asked), so BariStore keeps running while you are in Safari, Settings or another app; <b>Terminal Notifications</b> on (allow notifications when asked), for the pairing code.</li>
-    <li>In <b>rootshell › Settings › Terminal</b>: <b>Open Links from Programs</b> on, so that <b>baristore</b> opens this page in Safari by itself.</li>
-    <li><b>Local Network</b>: when rootshell asks to find devices on your local network, tap Allow (pairing needs it). Turned down? Settings › Privacy & Security › Local Network › rootshell on.</li>
-    </ol></div>`;
+    <li>A notification brings the 6-digit code (it shows here too): type it in Settings.</li>
+    <li>Then come back to Safari: setup goes on by itself.</li></ol>`;
 }
 
 function setupView() {
@@ -358,13 +342,13 @@ function setupView() {
   const vpn = st.vpn === true, paired = st.paired, signed = st.signed_in;
   const step = !paired ? (vpn ? 2 : 1) : !signed ? 3 : 4;
   const li = (n, title, body) => `<li class="${n < step ? "done" : n === step ? "now" : ""}"><div class="grow"><b>${title}</b>${n === step ? `<div class="muted small" style="margin-top:4px">${body}</div>` : ""}</div></li>`;
-  const s1 = st.vpn == null && !vpnMessage ? `Checking LocalDevVPN…`
-    : `Connect <b>LocalDevVPN</b> (App Store) on Wi-Fi. BariStore continues by itself.
+  const s1 = st.vpn == null && !vpnMessage ? `Checking Wi-Fi and LocalDevVPN…`
+    : `Join <b>Wi-Fi</b> and connect <b>LocalDevVPN</b> (App Store). BariStore continues by itself.
      ${vpnMessage ? `<div class="notice bad">${esc(vpnMessage)}</div>` : ""}
      <button class="btn secondary" onclick="check(true)" ${checking ? "disabled" : ""}>${checking ? "Checking…" : "Check again"}</button>`;
   const s2 = `<b>Developer Mode</b> must be on (Settings › Privacy & Security › Developer Mode; turning it on restarts the
      device). Not listed there? Start pairing: it appears; turn it on, and after the restart open BariStore and start
-     pairing again. Location Diary Mode, Terminal Notifications and Local Network as in Before you start.
+     pairing again.
      <button class="btn" onclick="act('pair')">Start pairing</button>`;
   const s3 = `<div style="display:flex;gap:10px;align-items:flex-start"><div class="grow">Sign in with your Apple ID. A free one is enough.</div>
        <button class="gear" onclick="openAnisette()" aria-label="Anisette server">${GEAR}</button></div>
@@ -374,8 +358,7 @@ function setupView() {
      <button class="btn" onclick="login()">Sign in</button>
      <div class="small muted" style="margin-top:10px">Your password stays on this device and is never saved.</div>`;
   return `<div class="wrap">
-    <header class="top"><img src="logo.svg" alt=""><div><div style="font-weight:700;font-size:20px">BariStore</div><div class="muted small">Set up this device</div></div></header>
-    ${beforeYouStart(step > 2 || !!S.task || S.pairing_waiting)}
+    <header class="top"><img src="logo.svg" alt=""><div class="grow"><div style="font-weight:700;font-size:20px">BariStore</div><div class="muted small">Set up this device</div></div>${powerButton()}</header>
     <div class="card pad"><ol class="steps">
       ${li(1, "Wi-Fi and LocalDevVPN", s1)}
       ${li(2, `Pair this device`, s2)}
@@ -386,7 +369,7 @@ function setupView() {
     <button class="link bad" style="text-align:center" onclick="ask({title:'Start again?', message:'BariStore forgets the pairing, the Apple ID session and its settings, and setup starts from the beginning. Apps stay on the device.', ok:'Start again', danger:true, run:reset})">Start again</button>
   </div>`;
 }
-/** Setup's connection check: its last answer, and whether one runs (one at a time; a failing one takes about 6 s). */
+/** Setup's connection check: its last answer, and whether one runs (one at a time; a failing one takes under 2 s). */
 let vpnMessage = "", checking = false;
 async function check(tapped) {
   if (checking) return;
@@ -1027,12 +1010,10 @@ function optionsView() {
     <div class="card">
       <div class="row"><div class="grow">BariStore</div><div class="muted">${esc(S.version)}</div></div>
       <div class="row"><button class="link" onclick="act('update')">Update BariStore</button></div>
-      <div class="row"><button class="link" onclick="openSheet({kind:'shortcut'})">BariStore Shortcut</button></div>
       <div class="row"><button class="link" onclick="showLog()">Log</button></div>
       <div class="row"><button class="link" onclick="confirmClearCache()">Clear cache${mbText(cacheBytes)}</button></div>
       <div class="row"><button class="link bad" onclick="confirmClearIpas()">Clear stored IPAs${mbText(ipaBytes)}</button></div>
       <div class="row"><button class="link bad" onclick="ask({title:'Reset BariStore?', message:'BariStore forgets the Apple ID session, the pairing, sources, settings and its app list, and starts setup again. Apps stay on the device.', ok:'Reset', danger:true, run:reset})">Reset BariStore</button></div>
-      <div class="row"><button class="link bad" onclick="quit()">Quit BariStore</button></div>
     </div>
     <p class="small muted" style="text-align:center">MIT licence. No accounts, no analytics: BariStore talks only to Apple, the anisette server and the sources you add.</p>
   </div>`;
@@ -1199,11 +1180,15 @@ function revokeCert(serial, name) {
     run: async () => { await act("revoke_certificate", { serial }); } });
 }
 async function reset() { await act("reset"); tab = "featured"; sheet = null; render(); toast("BariStore is reset."); }
+function confirmQuit() {
+  ask({ title: "Quit BariStore?", message: "BariStore stops running in rootshell. To open it again, type baristore in rootshell.",
+    ok: "Quit", danger: true, run: quit });
+}
 async function quit() {
   await act("quit");
   document.body.classList.remove("locked");
   $("#tabs").hidden = true;
-  $("#root").innerHTML = `<div class="wrap"><div class="empty" style="padding-top:30vh"><img src="logo.svg" alt="" width="56"><p>BariStore is closed.<br>${overRootshell ? "Close this page (✕). The <b>BariStore</b> Shortcut opens it again." : "Close this page. Type <b>baristore</b> in rootshell to open it again."}</p></div></div>`;
+  $("#root").innerHTML = `<div class="wrap"><div class="empty" style="padding-top:30vh"><img src="logo.svg" alt="" width="56"><p>BariStore is closed.<br>To open it again, type <b>baristore</b> in rootshell.</p></div></div>`;
   S = null;
 }
 let cacheBytes = null, ipaBytes = null;
@@ -1223,19 +1208,6 @@ async function showLog(checks) {
   openSheet({ kind: "log", text: checks ? "Running checks (network, tunnel, Apple sign-in)…" : "Loading…" });
   const r = await act(checks ? "checks" : "log");
   if (sheet?.kind === "log") { sheet.text = r.message; renderSheet(); }
-}
-/** The optional BariStore Shortcut (rootshell 1.0.16-178 or newer, for Open Local Shell's Command): one tap starts BariStore and shows this page over rootshell. */
-function shortcutSheet() {
-  const port = S?.page_port || 46510;
-  return { title: "BariStore Shortcut",
-    body: `<p class="muted small">${overRootshell ? "This page is shown by the BariStore Shortcut." : "Optional. The BariStore Shortcut starts BariStore with one tap (from the Home Screen too) and shows the store over rootshell instead of Safari, with rootshell in front while you use it."} Once, in <b>Shortcuts</b>:</p>
-      <ol class="how small">
-        <li>Tap <b>+</b> and name the Shortcut <b>BariStore</b>.</li>
-        <li>Add <b>Open Local Shell</b> (rootshell) and set its <b>Command</b> to <code>baristore page</code>.</li>
-        <li>Add <b>Wait</b> with 3 seconds.</li>
-        <li>Add <b>Show Web Page</b> with <code>http://127.0.0.1:${port}/</code>.</li>
-        <li>If you like, add it to the Home Screen (the Shortcut's ⓘ › Add to Home Screen).</li></ol>
-      <p class="muted small">Going to another app closes the page: BariStore goes on in rootshell (with Location Diary Mode on), and the Shortcut shows it again. rootshell opens a tab for each run; when BariStore already runs, the new tab says so and can be closed.</p>` };
 }
 async function copyLog() {
   try { await navigator.clipboard.writeText(sheet.text); toast("Copied. Paste it where you asked for help."); }
@@ -1306,7 +1278,6 @@ function sheetParts() {
     case "local": return { key: "local", closable: true, ...localSheet(sheet.ipa) };
     case "certs": return { key: "certs", closable: true, ...certsSheet() };
     case "p12": return { key: "p12", closable: true, ...p12Sheet() };
-    case "shortcut": return { key: "shortcut", closable: true, ...shortcutSheet() };
     case "share": return { key: "share", closable: true, title: sheet.title, body: `<p class="muted">${esc(sheet.note)}</p>`,
       foot: `<button class="btn" onclick="shareFile(sheet.file)">Share</button>` };
   }
@@ -1396,27 +1367,30 @@ async function poll() {
     if (failures) { failures = 0; stopped(false); }
     const text = JSON.stringify({ ...s, log: null });
     S = s;
-    overRootshell = !!s.shortcut;
     if (text !== lastState) { lastState = text; render(); }
   } catch (e) {
-    // Restarting (after an update), stopped in the background, or gone.
+    // Restarting (after an update), quit, or stopped by rootshell.
     failures++;
     if (failures >= 2) stopped(true);
   } finally { polling = false; }
 }
-/** Over everything while BariStore does not answer. */
+/** Over everything while BariStore does not answer; it goes once BariStore answers again (polling goes on). */
 function stopped(on) {
   let el = $("#stopped");
   if (!on) { if (el) el.remove(); return; }
   if (!el) { el = document.createElement("div"); el.id = "stopped"; document.body.appendChild(el); }
-  const long = failures > 15;
   el.className = "sheet-bg";
   el.style.alignItems = "center";
   el.innerHTML = `<div class="card pad" style="max-width:340px;margin:16px;text-align:center">
-    <img src="logo.svg" alt="" width="56"><h2 style="margin:10px 0 6px">${long ? "BariStore stopped" : "Reconnecting…"}</h2>
-    <p class="muted small">${long ? whereIsStore() + (overRootshell ? "" : " rootshell's Location Diary Mode keeps it running while you are here.")
-      : "Waiting for BariStore in rootshell."}</p>
-    ${long ? '<button class="btn" onclick="location.reload()">Try again</button>' : '<div class="bar indet"><i></i></div>'}</div>`;
+    <img src="logo.svg" alt="" width="56"><h2 style="margin:10px 0 6px">BariStore is not running</h2>
+    <p class="muted small">${START_AGAIN}</p></div>`;
+}
+/** A tap or a key on the page keeps BariStore running (it quits after 3 idle minutes): told at most every 20 s. */
+let lastUse = 0;
+function using() {
+  if (Date.now() - lastUse < 20000) return;
+  lastUse = Date.now();
+  timed(T + "/api/use", { method: "POST" }, 5000).catch(() => {});
 }
 async function loadCatalog() {
   try { C = await api("/api/catalog"); } catch (e) { return; }
@@ -1429,6 +1403,8 @@ async function loadCatalog() {
   act("catalog_refresh").then(() => setTimeout(loadCatalog, 800));
   check();
   setInterval(() => { if (S || failures) poll(); }, 900);
+  document.addEventListener("pointerdown", using, true);
+  document.addEventListener("keydown", using, true);
   // Back from the background: ask at once instead of at the next tick.
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
   // Setup's first step moves on by itself once LocalDevVPN answers.

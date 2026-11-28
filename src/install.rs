@@ -803,12 +803,13 @@ pub async fn place_pairing_file(session: &Session, installed_id: &str, kind: &st
 /// startup file, ~/.rootshellrc (sourced in every new tab; the functions it
 /// defines stay in the tab's shell). One line, so that rootshell's
 /// line-by-line fallback reads it too. A store may be running in another
-/// tab (each run of the BariStore Shortcut opens a new one): rootshell then
+/// tab (each run of the Home Screen Shortcut opens one): rootshell then
 /// holds this tab's mkdir and ifconfig until that one ends, so only the
 /// shell's own `[` and `cd` come before `baristore.wasm --join`, which
-/// hands the request to it (main.rs). Otherwise it saves `ifconfig`'s
-/// output: pairing's announcement needs the device's Wi-Fi address, which
-/// a WebAssembly program cannot ask for (mdns.rs). An update ends
+/// opens the running store's page (main.rs). Otherwise it saves
+/// `ifconfig`'s output: whether the device is on Wi-Fi, and its address for
+/// pairing's announcement, which a WebAssembly program cannot ask for
+/// (mdns.rs, session.rs `on_wifi`). An update ends
 /// BariStore with `crate::UPDATED`: the new build starts at once, without
 /// the arguments.
 pub const ROOTSHELLRC: &str = "# >>> BariStore >>> (https://barismd.github.io/BariStore/)
@@ -839,25 +840,18 @@ pub async fn set_up_command() {
         kept.push('\n');
     }
     kept.push_str(ROOTSHELLRC);
+    use crate::rootshell::osc::{say, style, GREEN};
     match std::fs::write(&rc, kept) {
-        Ok(()) => crate::rootshell::osc::say("The baristore command is set up (in every new tab).\n\
-            Before setup, once:\n\
-            - Developer Mode on: Settings › Privacy & Security › Developer Mode (not listed? it appears when \
-            BariStore starts pairing)\n\
-            - LocalDevVPN connected, on Wi-Fi\n\
-            - rootshell › Settings › General: Location Diary Mode on (Mode: Auto During Active Sessions) and \
-            Terminal Notifications on\n\
-            - rootshell › Settings › Terminal: Open Links from Programs on (the store then opens in Safari by \
-            itself)\n\
-            - allow rootshell's Local Network access when iOS asks"),
-        Err(e) => crate::rootshell::osc::say(&format!("Could not set up the baristore command ({e}): type \
-                                                       baristore.wasm instead.")),
+        Ok(()) => say(&format!("{} baristore command set up", style(GREEN, "✓"))),
+        Err(e) => say(&format!("Could not set up baristore: {e}")),
     }
     match crate::update::newer_available().await {
-        Ok(false) => crate::rootshell::osc::say("baristore.wasm matches its release."),
-        Ok(true) => crate::rootshell::osc::say("baristore.wasm in ~/bin is not the published build: download it \
-                                                 again if you did not build it yourself."),
-        Err(e) => crate::rootshell::osc::say(&format!("baristore.wasm could not be checked ({e}).")),
+        Ok(false) => say(&format!("{} download checked", style(GREEN, "✓"))),
+        Ok(true) => {
+            say("! Not the published build:");
+            say("  download it again.");
+        }
+        Err(e) => say(&format!("(not checked: {e})")),
     }
 }
 

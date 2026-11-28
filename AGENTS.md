@@ -3,10 +3,12 @@
 ## Goal
 
 An app store for iPhone/iPad that runs in **rootshell** (kitknox/rootshell,
-App Store, 1.0.16-177+; 178+ for the Shortcut), one device, no computer.
-`baristore` (a function `baristore install` puts in ~/.rootshellrc; the
-install line runs it) opens the store page in Safari by itself; an optional
-**BariStore** Shortcut shows it over rootshell instead. Installed with one line,
+App Store, 1.0.16-177+), one device, no computer. Commands as Open Minis
+had them (owner, 2026-11-28): `baristore` (a function `baristore install`
+puts in ~/.rootshellrc; the install line runs it) starts the store in its
+rootshell tab and opens the page in Safari, `baristore update`, `baristore
+log`. A rootshell profile and a Shortcut put it on the Home Screen
+(docs/shortcut.md). Installed with one line,
 `sh -c "$(curl -fsSL https://raw.githubusercontent.com/barismd/BariStore/test/docs/install.sh)"`
 while it is a test build (the website's address,
 https://barismd.github.io/BariStore/install.sh, once 1.2.0 is released on
@@ -27,9 +29,11 @@ applied nor shown for it (owner, 1.1.1).
   2026-11-28: "2.0.0 değil 1.2.0"; 1.2.0-alpha.N while tested). The `test`
   branch's history was squashed into one commit by the owner on
   2026-11-28, its earlier test releases deleted, and numbering started again
-  at 1.2.0-alpha.1. Commits are the owner's (barismd), signed in a
-  Codespace (Settings › Codespaces › GPG verification) so GitHub shows them
-  Verified; none says it is Claude's (owner, 2026-11-28). Open Minis
+  at 1.2.0-alpha.1. Commits are the owner's (barismd) with Claude as
+  co-author (owner, 2026-11-28, later: "benim adım ve claude ortak
+  commit"); GitHub shows only commits signed in the owner's Codespace
+  (Settings › Codespaces › GPG verification) as Verified: neither the
+  session's own signing key nor the API's commits are his. Open Minis
   installs keep working on 1.1.x meanwhile; nothing published for rootshell
   touches them.
 - Open Minis's end (owner, 2026-11-28), once rootshell is stable and 1.2.0
@@ -62,12 +66,17 @@ applied nor shown for it (owner, 1.1.1).
   tried), then told to add a number at account.apple.com or sign in once on
   an Apple device.
 - Instructions (owner, 2026-11-28: "basit ve anlaşılır, kurulumdan önce"):
-  README, site and the setup page start with Before you install / Before
-  you start: every setting with its exact place (Developer Mode; LocalDevVPN
-  Connect; rootshell › Settings › General › Location Diary Mode, Mode Auto
-  During Active Sessions, and Terminal Notifications; rootshell › Settings ›
-  Terminal › Open Links from Programs; Local Network access), and the extra
-  steps; the install command prints the same. No word on a Live Activity
+  README and site start with Before you install: every setting with its
+  exact place (Developer Mode; LocalDevVPN Connect; rootshell › Settings ›
+  General › Location Diary Mode and Terminal Notifications; rootshell ›
+  Settings › Terminal › Open Links from Programs; Local Network access). The
+  terminal shows the same at the first start (main.rs `CHECKLIST`), then
+  "Press Return to open the store." and opens Safari; later starts go
+  straight to Safari (`welcomed`). Not on the page (owner, later: it means
+  nothing there). Terminal lines are 34 columns at most, so they fit the
+  smallest iPhone upright with rootshell's 13 pt font (the owner: "kirli ve
+  okunamaz"), with a little bold, dim and colour; the page's address is a
+  link titled Open BariStore, as the address does not fit. No word on a Live Activity
   (owner, 2026-11-28: BariStore uses none; rootshell's sign while it runs
   is location's, from Location Diary Mode). rootshell runs WASI
   Preview 1 programs in a hidden web view and lends them sockets and TLS; it
@@ -92,28 +101,29 @@ applied nor shown for it (owner, 1.1.1).
   hold on the address › Open Link. Location Diary Mode keeps the store
   running behind Safari. A typed `baristore` while the store runs in
   another tab opens Safari at its page too.
-- The BariStore Shortcut is optional (Options › BariStore Shortcut, README,
-  site; not on the setup page): one tap (Home Screen too) starts BariStore
-  and shows the store over rootshell, which stays in front, as
-  atelier-install 0.4.0 does it (owner, earlier on 2026-11-28: "Rootshell
-  üzerinde çalışsın"; no random numbers to type; Home Screen optional).
-  Three actions, no rootshell profile any more: Open Local Shell (Command
-  `baristore page`; the same `pendingStartupCommand` path as a profile's
-  Startup Command), Wait 3 s, Show Web Page http://127.0.0.1:46510/. `page`
-  arms the store (web.rs `arm`): the first request for the bare address
-  within a minute is sent on to a key made for it. Tabs: rootshell opens a
-  new one for every run of Open Local Shell (or a profile) and has no way to
-  reuse one or for a program to close its own (read 2026-11-28:
-  `createLocalProfile` always opens a tab; `exec` is no command of its
-  local shell; a script's `exit` ends only the script), so a run while
-  BariStore already runs leaves one finished tab that says it can be
-  closed. Only rootshell can change that (an option to focus a profile's
-  open tab). Not done, for now: rootshell reads ~/rootshell.conf
-  (`open-links-from-programs`, `location-diary-auto-mode`,
-  `terminal-notification-enabled` keys), but on iOS only at launch, on
-  coming to the front, or with the `reloadconfig` command (which a script
-  cannot run), so settings written by the installer would apply only after
-  rootshell left the front once; it would also pin them to this device.
+- Home Screen (owner, 2026-11-28, later: "rootshell'den profil
+  oluşturulup shortcut'ta o profili kullanarak ana ekrana ekleme"; no
+  `baristore page`, no tabs or programs piled up): a Local Shell profile
+  "BariStore" with the Startup Command `baristore`, and a Shortcut of one
+  action, Open Connection Profile (BariStore), added to the Home Screen
+  (docs/shortcut.md). The page shows in Safari as with a typed `baristore`;
+  a run while BariStore runs only opens Safari (`--join`), so one program
+  at most. Tabs, read in rootshell 1.0.17-183 (2026-11-28): a local
+  profile always opens a new tab (`createLocalProfile`; no focusing of an
+  open one, which SSH mux profiles have); a tab closes only on a typed
+  top-level `exit` (LocalShellSession+Input.swift; `exit` in a function or
+  script ends only the script); a startup command's lines are all typed at
+  once (`processInput` loops over them while the first runs), so
+  "baristore⏎exit" would close the tab and end BariStore at once; the
+  intent's Execute in Shell (`exec`) exists for SSH only. So each run
+  leaves a tab the user closes; docs/shortcut.md says so. Only rootshell
+  can change that (reuse a profile's tab). Not done, for now: rootshell
+  reads ~/rootshell.conf (`open-links-from-programs`,
+  `location-diary-auto-mode`, `terminal-notification-enabled` keys), but on
+  iOS only at launch, on coming to the front, or with the `reloadconfig`
+  command (which a script cannot run), so settings written by the installer
+  would apply only after rootshell left the front once; it would also pin
+  them to this device.
 - One install line for testing too (owner: "tek curl | sh linki"):
   rootshell's `sh` runs no script piped to it (a bare `sh`, or `sh` with
   only flags, does nothing; LocalShellSession+Input.swift), so the line is
@@ -227,11 +237,14 @@ applied nor shown for it (owner, 1.1.1).
   512 KB past 2 MB (it only ever grew).
 - rootshell keeps a program running in the background only with its Location
   Diary Mode on (Settings, Auto During Active Sessions counts a WASM program
-  from 1.0.16-177; without it ~25 s, `BackgroundExecutionCoordinator`): in
-  Safari, always while the page is used; with the Shortcut, rootshell is in
-  front while the page is up and in the background only in Settings or
-  another app. Setup and pairing say so; there is no keep-alive of BariStore's own
-  (Minis's silent speech is gone).
+  from 1.0.16-177; without it ~25 s, `BackgroundExecutionCoordinator`):
+  always while the page is used in Safari. So that it does not run (and
+  use location) for nothing (owner, 2026-11-28), it quits after 3 minutes
+  without a tap or key on the page (`/api/use`, at most every 20 s) or an
+  upload, counted from the last task's end (web.rs `quit_when_idle`), and
+  the page's power button (top right everywhere, with a confirmation)
+  quits it at once; Options has no Quit any more. No keep-alive of
+  BariStore's own (Minis's silent speech is gone).
 - Versions: 1.0.0 is the first stable release (history squashed). CI builds
   every push to `main` (and `test`) that touches the code into
   `v<version>` with `baristore.wasm` and its `.sha256`: the latest release when
@@ -244,7 +257,8 @@ applied nor shown for it (owner, 1.1.1).
   (owner, 1.1.1 was published again: "the old one must not stay").
 - Website: `docs/` on GitHub Pages (main, /docs):
   https://barismd.github.io/BariStore/, with the one install line, the
-  optional Shortcut's steps and the screenshots README shows. Until 1.2.0 is released
+  screenshots README shows; README is short, docs/shortcut.md and
+  docs/how-it-works.md hold the rest (owner, 2026-11-28). Until 1.2.0 is released
   on main, the site there is Open Minis's and every install line (README,
   site, the script's comment) is the `test` branch's raw address.
   `docs/install.sh` downloads the newest release's baristore.wasm (the
@@ -321,18 +335,12 @@ applied nor shown for it (owner, 1.1.1).
   the page is opened with OSC 1337 `OpenURL` (http(s) only, Settings ›
   Terminal › Open Links from Programs, rootshell in front) and printed as an
   OSC 8 link. Untested on device.
-- The page is in Safari or in the Shortcut's web view (Show Web Page; it
-  closes when rootshell goes to the background, and ✕ closes it): their
-  own dialogs and share sheet; app URLs (livecontainer://) cannot be opened
-  by a WebAssembly program, so a task asks the page (question kind "open": a
-  link the user taps, iOS asks before opening the app). The store serves
-  the page under its own key (`running`, Safari) and keys made for the
-  Shortcut's runs (`page-keys`, the last 8, so an open page survives a
-  restart); the state
-  says which (`shortcut`) and the page words its hints so. It prefers port
-  46510 (the Shortcut's); when another program has it, it takes another and
-  a later Shortcut run asks it to serve 46510 too (`/api/arm`). Untested on
-  device.
+- The page is in Safari: its own dialogs and share sheet; app URLs
+  (livecontainer://) cannot be opened by a WebAssembly program, so a task
+  asks the page (question kind "open": a link the user taps, iOS asks
+  before opening the app). The store serves the page under one key
+  (`running`: port and key, kept while the port is free, so an open page
+  survives a restart). Untested on device.
 - rootshell's Open Connection Profile and Open Local Shell (Shortcuts;
   Open Local Shell's Command since 1.0.16-178, 467ab02b) open a new tab and
   type the command into it once the shell started, so ~/.rootshellrc's
@@ -344,9 +352,9 @@ applied nor shown for it (owner, 1.1.1).
   reads it too) runs only the shell's own `cd` and `[` before
   `baristore.wasm --join "$@"` while ~/.baristore/live is there (written as
   a store starts, removed by Quit and an update; a store stopped by Ctrl-C
-  leaves it, and --join then removes it): --join arms the running store
-  for `page`, tells a typed `baristore` where it is, runs log/update/
-  version itself, and ends with 1 when no store answers. Then the function
+  leaves it, and --join then removes it): --join opens the running
+  store's page (and, from the install line, sets up the command), runs
+  log/update/version itself, and ends with 1 when no store answers. Then the function
   saves ifconfig.txt, runs `baristore.wasm` from ~/bin and starts it again
   while it ends with 75 (an update). In a script or function a `.wasm` runs
   in rootshell's WASM runtime (`routeAppCommand`), not ios_system; a
@@ -357,25 +365,36 @@ applied nor shown for it (owner, 1.1.1).
   has no `sh`, so `curl … | sh` runs nothing. In a script, a pipeline of
   programs fails ("sh: not supported: pipelines with external commands",
   owner's device, 2026-11-28, inside `$(…)`): one program per command. No stdin is read (a read would
-  block the program): Ctrl-C or Options › Quit end it. A crash logs its
+  block the program), but before the first start's Return: typing
+  `baristore` in the tab where the store runs feeds its stdin and does
+  nothing (owner's "tepki vermiyor"), so the terminal says it runs in this
+  tab. Ctrl-C (rootshell terminates the worker, sockets closed), ⏻ or the
+  idle quit end it. A crash logs its
   panic ("crash: …") before the program ends. Untested on device.
 - LocalDevVPN (seomin0610/LocalDevVPN, read 2026-11-28) swaps the source
   and destination address of every IPv4 packet for 10.7.0.1, ports
   unchanged. So the VPN check is a datagram from a UDP port P of its own to
   10.7.0.1:P, which LocalDevVPN hands back to that same socket; without it
-  nothing comes back (`net::udp_echo`, three tries of 1.5 s). Owner,
-  1.2.0-alpha.2: setup's first step never saw LocalDevVPN, and Check again
-  did nothing visible. Up to alpha.2 the check waited for the ICMP refusal
-  of a datagram to 10.7.0.1:49152, but that refusal describes the swapped
-  datagram (10.7.0.1:P to the device's 49152), so it never reached the
-  asking socket. Check again now shows "Checking…" and the answer, and
-  checks never overlap. A TCP connect would hold the program. Untested on
-  device.
+  nothing comes back (`net::udp_echo`, two tries of 0.6 s: owner, alpha.3,
+  a failing check took long). Owner, 1.2.0-alpha.2: setup's first step
+  never saw LocalDevVPN, and Check again did nothing visible. Up to alpha.2
+  the check waited for the ICMP refusal of a datagram to 10.7.0.1:49152,
+  but that refusal describes the swapped datagram (10.7.0.1:P to the
+  device's 49152), so it never reached the asking socket. Check again shows
+  "Checking…" and the answer, and checks never overlap. A TCP connect would
+  hold the program. Owner, alpha.3: on mobile data the echo came back too,
+  and step 1 passed; the device's services refuse LocalDevVPN there. Wi-Fi
+  comes first (session.rs `route`): en0 with an IPv4 address in the
+  `ifconfig` output the `baristore` command saved just before this start
+  (`note_wifi`; a file from an earlier start counts as unknown, never as no
+  Wi-Fi). It cannot be read again while BariStore runs (a program's own
+  multicast does not come back to a socket that joined no group, and
+  rootshell offers no setsockopt), so the page says to quit and start it
+  again after joining Wi-Fi. Untested on device.
 - The "Pair with …" entry asks for the passcode, then sends pair-setup M1.
-  The code is chosen as pairing starts and shown on the page at once (the
-  user leaves the page for Settings; atelier-install
-  chooses its code ahead the same way), and notified at M1 (owner: an
-  earlier notification is gone by then); a wrong code gets a new one.
+  The code is made then, at M1, as Open Minis did (owner, 2026-11-28: not
+  ahead of time), posted as a notification and shown on the page; a wrong
+  code means a new one at the next try.
 - rootshell's `ifconfig` leaves out the line break after each `hwassist=…<…>`
   line, so an interface's `inet` or the next interface's header follows on
   it (atelier-install, on an iPhone, 14 Nov 2026): `mdns::ifconfig_lines`
@@ -419,8 +438,10 @@ applied nor shown for it (owner, 1.1.1).
   connections ahead of need).
 - A task's title and retry are in `~/.baristore/task-running` while it runs:
   the next start shows a task the last one stopped during as failed, with
-  Try again. The page reloads when the store's boot id changes and shows
-  "Reconnecting" while the store does not answer (8 s state, 120 s actions).
+  Try again. The page reloads when the store's boot id changes; while the
+  store does not answer it says BariStore is not running and to type
+  `baristore` in rootshell (no Reconnecting spinner: owner, 2026-11-28),
+  and goes on by itself once it answers (8 s state, 120 s actions).
 - Wi-Fi cannot be read in rootshell either. No answer to the VPN check means
   no route (mobile data or no VPN): say so, never knock 16 000 ports then
   (siboot's preflight); a refused port does mean "look on other ports". The
@@ -645,6 +666,14 @@ the page in Playwright (Before you start with Open Links from Programs, no
 Shortcut link on the setup page, the Shortcut sheet with Open Local Shell).
 Untested on a device: Safari opened by OpenURL, Open Link, the store
 behind Safari, the Shortcut with Open Local Shell.
+Linux-verified for 1.2.0-alpha.4: the unit tests natively and in
+rootshell's worker; in that worker, `baristore install` (two short lines),
+the usage, the first start (checklist, Return read from stdin, `welcomed`,
+then the link and three lines, all ≤34 columns), the page in Playwright
+(no Before you start, one ⏻, step 1's LocalDevVPN message, ⏻ › Quit ending
+the program and removing `live`), the 3-minute idle quit with the page
+open (the page then says BariStore is not running). Untested on device:
+all of it in rootshell, the Wi-Fi note, the profile and Shortcut.
 Linux-verified for 1.2.0-alpha.3: `net::udp_echo` natively and in
 rootshell's worker (its datagram back from its own port; none counted
 from TEST-NET-1; the worker's UDP bind kept its error listener, so a

@@ -11,9 +11,21 @@
 //!   in the background too, when Settings › Notifications › Terminal
 //!   Notifications is on (GhosttyApp.swift DESKTOP_NOTIFICATION).
 //! * OSC 8: a link the terminal shows underlined; a long press opens it.
+//! * SGR: bold, dim and colours, for lines short enough for the smallest
+//!   iPhone upright (34 columns: rootshell's 13 pt font).
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use std::io::Write;
+
+/// `text` in a style the terminal shows (SGR): bold, dim or a colour.
+pub fn style(code: &str, text: &str) -> String {
+    format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+pub const BOLD: &str = "1";
+pub const DIM: &str = "2";
+pub const GREEN: &str = "32";
+pub const CYAN: &str = "36";
 
 /// A line on the terminal. Never panics (the tab may be gone).
 pub fn say(text: &str) {
@@ -28,9 +40,12 @@ fn plain(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).map(|c| if c == ';' { ',' } else { c }).collect()
 }
 
-/// Asks rootshell to open `url` (http or https) in Safari.
+/// Asks rootshell to open `url` (http or https) in Safari. No line of its
+/// own: the terminal shows nothing for it.
 pub fn open_url(url: &str) {
-    say(&format!("\x1b]1337;OpenURL=:{}\x07", B64.encode(url)));
+    let mut out = std::io::stdout();
+    let _ = out.write_all(format!("\x1b]1337;OpenURL=:{}\x07", B64.encode(url)).as_bytes());
+    let _ = out.flush();
 }
 
 /// A notification with `title` and `body`.

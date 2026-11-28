@@ -244,10 +244,12 @@ impl App {
 
     // --- device ---------------------------------------------------------
 
-    pub async fn check_vpn(&self) -> bool {
-        let up = session::vpn_up().await;
-        self.inner.lock().unwrap().setup.vpn = Some(up);
-        up
+    /// Wi-Fi and LocalDevVPN (session.rs `route`), noted for setup's first
+    /// step.
+    pub async fn check_route(&self) -> Result<(), String> {
+        let route = session::route().await;
+        self.inner.lock().unwrap().setup.vpn = Some(route.is_ok());
+        route.map_err(str::to_string)
     }
 
     /// A live session (reused while it works), or a clear reason why not.
@@ -264,9 +266,7 @@ impl App {
             logf!("device: the cached tunnel does not answer; opening a new one");
             *guard = None;
         }
-        if !self.check_vpn().await {
-            return Err(session::NO_ROUTE.into());
-        }
+        self.check_route().await?;
         let record = flow::load_record().ok_or("This device is not paired yet.")?;
         // Bounded: on mobile data LocalDevVPN can take a connection and then
         // never answer.
@@ -296,19 +296,14 @@ impl App {
     pub async fn pair(&self) -> Result<String, String> {
         // Pairing itself would work on mobile data, but nothing after it would.
         self.step("Checking Wi-Fi and LocalDevVPN");
-        if !self.check_vpn().await {
-            return Err(session::NO_ROUTE.into());
-        }
+        self.check_route().await?;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let app = self.clone();
         let watcher = rt::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    flow::Event::Waiting { code } => {
-                        let mut i = app.inner.lock().unwrap();
-                        i.pairing_waiting = true;
-                        i.pairing_code = code;
-                        drop(i);
+                    flow::Event::Waiting => {
+                        app.inner.lock().unwrap().pairing_waiting = true;
                         app.step("Waiting for Settings");
                     }
                     flow::Event::Code { code, attempt } => {
@@ -316,9 +311,9 @@ impl App {
                         let new = if attempt == 1 { "the code" } else { "the new code" };
                         app.step(format!("Type {new} in Settings (it came as a notification too)"));
                     }
-                    flow::Event::WrongCode { attempts_left, code } => {
-                        app.inner.lock().unwrap().pairing_code = code;
-                        app.step(format!("Wrong code. Tap Pair with BariStore again and type the new code \
+                    flow::Event::WrongCode { attempts_left } => {
+                        app.inner.lock().unwrap().pairing_code.clear();
+                        app.step(format!("Wrong code. Tap Pair with BariStore again: a new code comes \
                                           ({attempts_left} tries left)."));
                     }
                     flow::Event::Paired { name } => app.step(format!("Paired with {name}")),
