@@ -56,24 +56,26 @@ pub fn host_uuid() -> [u8; 16] {
     *u.as_bytes()
 }
 
-/// Is LocalDevVPN answering? It sends every IPv4 packet for 10.7.0.1 back
-/// to the device with source and destination swapped (its
-/// PacketTunnelProvider, read 2026-11-27), so a datagram to a port there
-/// nothing listens on comes back refused (ICMP) at once; without it nothing
-/// comes back. A datagram, not a TCP connection: rootshell's connect has no
-/// time limit, and a SYN nobody answers would hold up the whole program.
+/// Is LocalDevVPN answering? It hands every IPv4 packet for 10.7.0.1 back to
+/// the device with source and destination address swapped, ports unchanged
+/// (its PacketTunnelProvider, read 2026-11-28), so a datagram from port P to
+/// 10.7.0.1:P comes back to the socket that sent it; without it nothing
+/// comes back. (A datagram to a closed port's ICMP refusal names the
+/// swapped ports, so it never reached the socket that asked: 1.2.0-alpha.2
+/// and older saw no LocalDevVPN at all.) A datagram, not a TCP connection:
+/// rootshell's connect has no time limit, and a SYN nobody answers would
+/// hold up the whole program.
 pub async fn vpn_up() -> bool {
-    let (host, port) = override_endpoint().unwrap_or((LOOPBACK.to_string(), PAIRING_PORT));
+    let host = override_endpoint().map_or_else(|| LOOPBACK.to_string(), |(h, _)| h);
     // Up to three tries: back in the foreground, the first can go nowhere
     // while LocalDevVPN comes back (the owner's second try a few seconds
     // later always connected, 1.1.0).
     for _ in 0..3 {
-        match crate::net::udp_probe(&host, port, b"BariStore", Duration::from_millis(1500)).await {
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return true,
-            // Something answered the datagram: a route all the same.
+        let word = format!("BariStore {}", hex::encode(rand::random::<[u8; 8]>()));
+        match crate::net::udp_echo(&host, word.as_bytes(), Duration::from_millis(1500)).await {
             Ok(true) => return true,
-            Ok(false) => logf!("device: {host}:{port}: no answer"),
-            Err(e) => logf!("device: {host}:{port}: {e}"),
+            Ok(false) => logf!("device: nothing came back from {host}"),
+            Err(e) => logf!("device: {host}: {e}"),
         }
         rt::time::sleep(Duration::from_millis(500)).await;
     }

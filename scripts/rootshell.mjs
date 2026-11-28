@@ -325,8 +325,11 @@ function socketCall(p, reply) {
     case "bind":
       if (!h) return reply({ errno: E.EBADF });
       if (h.kind === "udp") {
-        h.udp.once("error", () => reply({ errno: E.EADDRINUSE }));
-        h.udp.bind(p.port, () => reply({ errno: 0 }));
+        // Only the bind's own error answers it: a later one (an ICMP
+        // refusal) must not answer this call again.
+        const failed = () => reply({ errno: E.EADDRINUSE });
+        h.udp.once("error", failed);
+        h.udp.bind(p.port, () => { h.udp.off("error", failed); reply({ errno: 0 }); });
         return;
       }
       h.port = p.port;

@@ -37,7 +37,7 @@ jobs:
         run: |
           cargo test --locked --target wasm32-wasip1 -- --test-threads=1 \
             --skip openssl --skip csr_verifies --skip opens_ours --skip usable_p12 --skip signature_in_one_pass \
-            --skip redirects_chunks --skip a_lost_connection --skip shares_a_file --skip udp_probes --skip signs_and_packs
+            --skip redirects_chunks --skip a_lost_connection --skip shares_a_file --skip signs_and_packs
       - name: Build baristore.wasm
         run: cargo build --release --locked --target wasm32-wasip1
       - name: Publish the release

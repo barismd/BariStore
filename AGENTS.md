@@ -67,9 +67,9 @@ applied nor shown for it (owner, 1.1.1).
   Connect; rootshell › Settings › General › Location Diary Mode, Mode Auto
   During Active Sessions, and Terminal Notifications; rootshell › Settings ›
   Terminal › Open Links from Programs; Local Network access), and the extra
-  steps; the install command prints the same.
-  rootshell may show a Live Activity (its General › Live Activity) while
-  BariStore runs: said to be rootshell's own. rootshell runs WASI
+  steps; the install command prints the same. No word on a Live Activity
+  (owner, 2026-11-28: BariStore uses none; rootshell's sign while it runs
+  is location's, from Location Diary Mode). rootshell runs WASI
   Preview 1 programs in a hidden web view and lends them sockets and TLS; it
   has Apple's multicast entitlement, so the pairable host can be announced as
   raw mDNS (`src/mdns.rs`; device-proven by siboot's rootshell pairing). Before:
@@ -359,11 +359,18 @@ applied nor shown for it (owner, 1.1.1).
   owner's device, 2026-11-28, inside `$(…)`): one program per command. No stdin is read (a read would
   block the program): Ctrl-C or Options › Quit end it. A crash logs its
   panic ("crash: …") before the program ends. Untested on device.
-- LocalDevVPN (seomin0610/LocalDevVPN, read 2026-11-27) swaps source and
-  destination of every IPv4 packet for 10.7.0.1, so the VPN check is a
-  datagram to 10.7.0.1:49152: refused (ICMP) at once through LocalDevVPN,
-  nothing without it (`net::udp_probe`, three tries of 1.5 s); a TCP connect
-  would hold the program. Untested on device.
+- LocalDevVPN (seomin0610/LocalDevVPN, read 2026-11-28) swaps the source
+  and destination address of every IPv4 packet for 10.7.0.1, ports
+  unchanged. So the VPN check is a datagram from a UDP port P of its own to
+  10.7.0.1:P, which LocalDevVPN hands back to that same socket; without it
+  nothing comes back (`net::udp_echo`, three tries of 1.5 s). Owner,
+  1.2.0-alpha.2: setup's first step never saw LocalDevVPN, and Check again
+  did nothing visible. Up to alpha.2 the check waited for the ICMP refusal
+  of a datagram to 10.7.0.1:49152, but that refusal describes the swapped
+  datagram (10.7.0.1:P to the device's 49152), so it never reached the
+  asking socket. Check again now shows "Checking…" and the answer, and
+  checks never overlap. A TCP connect would hold the program. Untested on
+  device.
 - The "Pair with …" entry asks for the passcode, then sends pair-setup M1.
   The code is chosen as pairing starts and shown on the page at once (the
   user leaves the page for Settings; atelier-install
@@ -638,6 +645,13 @@ the page in Playwright (Before you start with Open Links from Programs, no
 Shortcut link on the setup page, the Shortcut sheet with Open Local Shell).
 Untested on a device: Safari opened by OpenURL, Open Link, the store
 behind Safari, the Shortcut with Open Local Shell.
+Linux-verified for 1.2.0-alpha.3: `net::udp_echo` natively and in
+rootshell's worker (its datagram back from its own port; none counted
+from TEST-NET-1; the worker's UDP bind kept its error listener, so a
+later refusal answered the bind again and the run hung: fixed in
+scripts/rootshell.mjs, and the test is no longer skipped there); the page
+in Playwright (Check again showing Checking… and then the answer, no Live
+Activity note). Untested on device: the check through LocalDevVPN.
 
 Linux-verified for the first rootshell build: the unit tests natively (75)
 and as WebAssembly through rootshell's own worker (`scripts/rootshell.mjs`,

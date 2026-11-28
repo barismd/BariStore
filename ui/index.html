@@ -350,7 +350,7 @@ function beforeYouStart(started) {
     <li>In <b>rootshell › Settings › General</b>: <b>Location Diary Mode</b> on, Mode <b>Auto During Active Sessions</b> (allow location when asked), so BariStore keeps running while you are in Safari, Settings or another app; <b>Terminal Notifications</b> on (allow notifications when asked), for the pairing code.</li>
     <li>In <b>rootshell › Settings › Terminal</b>: <b>Open Links from Programs</b> on, so that <b>baristore</b> opens this page in Safari by itself.</li>
     <li><b>Local Network</b>: when rootshell asks to find devices on your local network, tap Allow (pairing needs it). Turned down? Settings › Privacy & Security › Local Network › rootshell on.</li>
-    </ol><p class="muted small" style="margin:0">While BariStore runs, rootshell may show a Live Activity on the Lock Screen and in the Dynamic Island: that is rootshell's.</p></div>`;
+    </ol></div>`;
 }
 
 function setupView() {
@@ -358,11 +358,10 @@ function setupView() {
   const vpn = st.vpn === true, paired = st.paired, signed = st.signed_in;
   const step = !paired ? (vpn ? 2 : 1) : !signed ? 3 : 4;
   const li = (n, title, body) => `<li class="${n < step ? "done" : n === step ? "now" : ""}"><div class="grow"><b>${title}</b>${n === step ? `<div class="muted small" style="margin-top:4px">${body}</div>` : ""}</div></li>`;
-  const other = S.vpn_message && !S.vpn_message.startsWith("No connection");
-  const s1 = st.vpn == null ? `Checking LocalDevVPN…`
+  const s1 = st.vpn == null && !vpnMessage ? `Checking LocalDevVPN…`
     : `Connect <b>LocalDevVPN</b> (App Store) on Wi-Fi. BariStore continues by itself.
-     ${other ? `<div class="notice bad">${esc(S.vpn_message)}</div>` : ""}
-     <button class="btn secondary" onclick="check()">Check again</button>`;
+     ${vpnMessage ? `<div class="notice bad">${esc(vpnMessage)}</div>` : ""}
+     <button class="btn secondary" onclick="check(true)" ${checking ? "disabled" : ""}>${checking ? "Checking…" : "Check again"}</button>`;
   const s2 = `<b>Developer Mode</b> must be on (Settings › Privacy & Security › Developer Mode; turning it on restarts the
      device). Not listed there? Start pairing: it appears; turn it on, and after the restart open BariStore and start
      pairing again. Location Diary Mode, Terminal Notifications and Local Network as in Before you start.
@@ -387,7 +386,15 @@ function setupView() {
     <button class="link bad" style="text-align:center" onclick="ask({title:'Start again?', message:'BariStore forgets the pairing, the Apple ID session and its settings, and setup starts from the beginning. Apps stay on the device.', ok:'Start again', danger:true, run:reset})">Start again</button>
   </div>`;
 }
-async function check() { const r = await act("check"); S.vpn_message = r.ok ? "" : r.message; render(); }
+/** Setup's connection check: its last answer, and whether one runs (one at a time; a failing one takes about 6 s). */
+let vpnMessage = "", checking = false;
+async function check(tapped) {
+  if (checking) return;
+  checking = true;
+  if (tapped) render();
+  try { const r = await act("check"); vpnMessage = r.ok ? "" : r.message; }
+  finally { checking = false; render(); }
+}
 function login() {
   const email = $("#email").value.trim(), password = $("#password").value;
   if (!email || !password) { toast("Enter your Apple ID email and password."); return; }
@@ -1420,7 +1427,7 @@ async function loadCatalog() {
   await poll();
   await loadCatalog();
   act("catalog_refresh").then(() => setTimeout(loadCatalog, 800));
-  act("check").then((r) => { S.vpn_message = r.ok ? "" : r.message; render(); });
+  check();
   setInterval(() => { if (S || failures) poll(); }, 900);
   // Back from the background: ask at once instead of at the next tick.
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });

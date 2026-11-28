@@ -7,7 +7,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -130,22 +130,37 @@ pub fn in_use(port: u16) -> bool {
     taken
 }
 
-/// One datagram to host:port, and what comes back within `wait`: Ok(true)
-/// for an answer, Ok(false) for none, the error an ICMP message brought
-/// (refused: nothing listens there, but the host is reachable). The other
-/// tasks run while it waits.
-pub async fn udp_probe(host: &str, port: u16, data: &[u8], wait: Duration) -> io::Result<bool> {
+/// `data` sent from a UDP port of its own to that same port at `host`, and
+/// whether it comes back to it within `wait`. LocalDevVPN hands every packet
+/// for its address back to the device with only the addresses swapped
+/// (device/session.rs `vpn_up`), so through it the datagram arrives at this
+/// very socket; without it nothing does. The other tasks run while it waits.
+pub async fn udp_echo(host: &str, data: &[u8], wait: Duration) -> io::Result<bool> {
     let fd = rs::socket(rs::SOCK_DGRAM).map_err(Errno::io)?;
-    // Connected, so that the host's ICMP error comes back as the next
-    // receive's (WasmUDPSocket.swift `drain`, as on BSD).
     let sock = Sock::new(fd);
+    let port = (0..8)
+        .map(|_| 49152 + rand::random::<u16>() % 16383)
+        .find(|&p| p != 62078 && rs::bind(fd, [0, 0, 0, 0], p).is_ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::AddrInUse, "no free UDP port"))?;
+    // Connected, so that only what comes from host:port is received.
     rs::connect(fd, host, port).and_then(|()| rs::send_all(fd, data)).map_err(Errno::io)?;
-    let mut buf = [0u8; 64];
-    let got = crate::rt::time::timeout(wait, std::future::poll_fn(|cx| sock.poll_read(cx, &mut ReadBuf::new(&mut buf)))).await;
-    match got {
-        Ok(Ok(())) => Ok(true),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Ok(false),
+    let until = Instant::now() + wait;
+    let mut got = Vec::new();
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        let mut buf = [0u8; 256];
+        let mut read = ReadBuf::new(&mut buf);
+        match crate::rt::time::timeout(left, std::future::poll_fn(|cx| sock.poll_read(cx, &mut read))).await {
+            Err(_) => return Ok(false),
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(())) if read.filled().is_empty() => return Ok(false),
+            Ok(Ok(())) => {
+                got.extend_from_slice(read.filled());
+                if got.windows(data.len()).any(|w| w == data) {
+                    return Ok(true);
+                }
+            }
+        }
     }
 }
 
@@ -244,25 +259,14 @@ mod tests {
         });
     }
 
-    /// A datagram to a port nothing listens on comes back refused, without
-    /// holding up the other tasks; one that is answered says so.
+    /// A datagram sent to its own port comes back (as LocalDevVPN sends it
+    /// back); one sent where nothing sends it back does not.
     #[test]
-    fn udp_probes() {
+    fn udp_echoes() {
         rt::block_on(async {
-            let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let port = closed.local_addr().unwrap().port();
-            drop(closed);
-            let e = udp_probe("127.0.0.1", port, b"x", Duration::from_secs(2)).await.unwrap_err();
-            assert_eq!(e.kind(), io::ErrorKind::ConnectionRefused);
-            let echo = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let port = echo.local_addr().unwrap().port();
-            let t = std::thread::spawn(move || {
-                let mut buf = [0u8; 16];
-                let (n, from) = echo.recv_from(&mut buf).unwrap();
-                echo.send_to(&buf[..n], from).unwrap();
-            });
-            assert!(udp_probe("127.0.0.1", port, b"x", Duration::from_secs(2)).await.unwrap());
-            t.join().unwrap();
+            assert!(udp_echo("127.0.0.1", b"BariStore 42", Duration::from_secs(2)).await.unwrap());
+            // TEST-NET-1 (RFC 5737): nothing sends it back from there.
+            assert!(!udp_echo("192.0.2.1", b"BariStore 43", Duration::from_millis(600)).await.unwrap_or(false));
         });
     }
 

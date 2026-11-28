@@ -55,9 +55,6 @@ Once, on the iPhone or iPad (iOS 27 or newer, a free Apple ID is enough):
 5. **Local Network:** when rootshell asks to find devices on your local network, tap **Allow** (pairing needs it).
    Turned it down? Settings › Privacy & Security › Local Network › rootshell on.
 
-While BariStore runs, rootshell may show a Live Activity on the Lock Screen and in the Dynamic Island: that is
-rootshell's own, and fine.
-
 ### Install
 
 Paste this line into a rootshell tab:
