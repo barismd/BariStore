@@ -14,3 +14,6 @@ account*.plist
 .DS_Store
 __pycache__/
 /state/
+
+# private working docs (not committed)
+/.private-docs/

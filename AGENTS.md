@@ -285,7 +285,17 @@ applied nor shown for it (owner, 1.1.1).
   October). A refused text message (403, or Apple's serviceErrors such as
   -28248) is NoCode: the other claim is tried instead of waiting for a code;
   a 412 names the phone number's real id (xtool #424); -22979/-22981 keep
-  the last code. No Android-library servers (-80046). Fresh HTTP/1.1 connection per GSA
+  the last code. No Android-library servers (-80046). `au=repair` means no
+  second factor on the account. Before asking for a second-factor code,
+  GET /auth (`second_factor_headers`, json) lists `trustedPhoneNumbers`
+  (id, numberWithDialCode, pushMode sms/voice) and may say
+  `noTrustedDevices`; an Apple ID with no trusted number or device (one
+  made without a phone, e.g. Apple Music on Android, issue #3) is not asked
+  for a code: `NoCode`, the other claim is tried, and the error says to add
+  a number at account.apple.com or sign in once on an Apple device. The log
+  names what Apple asked for (au, hsc 409, number counts, authenticationType).
+  `au=trustedDeviceSecondaryAuth`, `au=secondaryAuth`, `hsc==409` still ask
+  for a code when a device or number can receive one. Fresh HTTP/1.1 connection per GSA
   request (isideload: reused ones get 5xx). Windows-library servers need the
   hsc 434 resync. One anisette identity per (server, client info). Email is
   lowercased. Credential codes -20101/-20970/-22406 stop sign-in.
@@ -448,6 +458,7 @@ against a mock device, CSR and PKCS#12 with openssl (3.x and 1.1.1), signatures
 with rcodesign. **Device-verified (owner):** LocalDevVPN check, pairing (0.1.0); Apple sign-in
 with 2FA, signing and installing an app (0.10.0-alpha.3).
 Everything else: say "untested on device" until the owner confirms.
+Linux-verified for 1.1.3: `noTrustedDevices` + `trustedPhoneNumbers` parsing from GET /auth; an Apple ID with no trusted number or device (issue #3) -> `NoCode`, other claim tried, add-number/sign-in-once message; `au=repair`, au/hsc, `no second factor`, `hsc 409`, `trusted phone number(s)`, `noTrustedDevices` logging; two new unit tests; `cargo test` 64 passed; `cargo build --release` 0 warnings. Reported working on device by the reporter (issue #3 no-2FA case now signs in; 2FA case signs in, code arrives); `noTrustedDevices` not re-checked live here; `scripts/build.sh` run.
 Linux-verified for 1.1.2: a 663 MB synthetic IPA (150 MB framework, 512 MB
 of assets) signed at 322 MB peak (1.1.1: 1656 MB), the archive the same as
 1.1.1's but for the re-signed binaries; the file reader against the file's
